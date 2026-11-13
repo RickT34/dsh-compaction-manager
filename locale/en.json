@@ -1,0 +1,1 @@
+{ "meta": { "title": "Compaction manager", "description": "One panel for context compaction: order model-free methods (official pruner, Magic Compact, OpenCode DCP, tool-call folding), tune automatic compaction, preview results, and let the model restore hidden content." } }

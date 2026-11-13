@@ -1,0 +1,5 @@
+# Bundle patch: mount the host half once on the host plane. The `dsh.client`
+# declaration in package.json makes the Web app load ./client as the browser half.
+- insert:
+    - id: compaction-manager
+      name: dsh-compaction-manager
