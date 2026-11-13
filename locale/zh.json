@@ -1,1 +1,1 @@
-{ "meta": { "title": "压缩管理", "description": "统一的上下文压缩面板：排列不调用模型的压缩方法（官方裁剪、Magic Compact、OpenCode DCP、工具调用折叠），调整自动压缩参数，预览压缩效果，并让模型取回被隐藏的内容。" } }
+{"meta": {"title": "压缩管理", "description": "统一的上下文压缩面板：排列不调用模型的压缩方法（官方裁剪、Magic Compact、OpenCode DCP、工具调用折叠），调整自动压缩参数，预览压缩效果，并让模型取回被隐藏的内容。", "detail": "README.zh.md"}}

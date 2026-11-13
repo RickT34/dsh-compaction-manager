@@ -1,5 +1,7 @@
 # dsh-compaction-manager
 
+English | [中文](README.zh.md)
+
 A DeepSeek Harness plugin that puts context compaction in one panel:
 
 - **Ordered compaction steps.** When compaction triggers, the enabled steps run in the configured order. None of them calls a model. If the context is still over the threshold afterwards, `compaction-basic` writes its LLM summary as the fixed last step.
