@@ -22,10 +22,12 @@
 需要 DeepSeek Harness `>=0.2.2-rc.1 <0.3.0`。
 
 ```sh
-dsh plugin --profile web add github:RickT34/dsh-compaction-manager
+dsh plugin --profile web add dsh-compaction-manager
 ```
 
-也可以在 Web 界面里打开**插件 → 添加插件**，输入 `github:RickT34/dsh-compaction-manager`。安装后左侧栏会出现**压缩管理**，**插件**页里这个插件的详情页也有打开面板的入口。
+也可以在 Web 界面里打开**插件 → 添加插件**，输入 `dsh-compaction-manager`。安装后左侧栏会出现**压缩管理**，**插件**页里这个插件的详情页也有打开面板的入口。
+
+如果想装 GitHub 上的最新提交而不是 npm 发布版，把包名换成 `github:RickT34/dsh-compaction-manager`。
 
 ## 内置方法
 

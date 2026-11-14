@@ -20,10 +20,12 @@ The default configuration behaves exactly like stock DSH: only the official head
 Requires DeepSeek Harness `>=0.2.2-rc.1 <0.3.0`.
 
 ```sh
-dsh plugin --profile web add github:RickT34/dsh-compaction-manager
+dsh plugin --profile web add dsh-compaction-manager
 ```
 
-Or in the Web app: **Plugins → Add plugin**, enter `github:RickT34/dsh-compaction-manager`. The panel appears in the sidebar as **Compaction**, and on the plugin's page under **Plugins**.
+Or in the Web app: **Plugins → Add plugin**, enter `dsh-compaction-manager`. The panel appears in the sidebar as **Compaction**, and on the plugin's page under **Plugins**.
+
+To install the latest commit from GitHub instead of the npm release, use `github:RickT34/dsh-compaction-manager`.
 
 ## Built-in methods
 
