@@ -4,7 +4,7 @@ import z from '@deepseek-ai/schemastery';
 import { DEFAULT_PIPELINE, RECALL_TOOL, buildView } from './core.js';
 import { MethodRegistry, normalizePipeline } from './registry.js';
 import { installIntegration, cleanBasicOverrides } from './integration.js';
-import { enabledSteps, estimatorOf, previewSession, recallActive, runPipeline } from './pipeline.js';
+import { enabledSteps, estimatorOf, fallbackEstimate, previewSession, recallActive, runPipeline } from './pipeline.js';
 import { liveAccessor, recoverOriginal, snapshotAccessor, surfaceEntries } from './session-view.js';
 
 export const name = 'compaction-manager';
@@ -84,6 +84,7 @@ export function apply(ctx, config) {
     return value ?? fallback;
   };
   const stats = { prunerCalls: 0, runs: [], basicEngines: new Map(), prunerConfigs: new Map() };
+  const currentPrunerConfig = () => stats.prunerConfigs.values().next().value ?? { thresholdChars: 8192, headChars: 4096, tailChars: 1024 };
 
   // Extension point for other plugins: ctx.compactionMethods.register(method).
   ctx.provide('compactionMethods', {
@@ -229,7 +230,7 @@ export function apply(ctx, config) {
       const fold = official.foldSurface(snapshot.events, ctx.sessions.messageProjections ?? []);
       entries = surfaceEntries(snapshotAccessor(snapshot.events, fold, official.deriveEventMessage));
     }
-    const prunerConfig = stats.prunerConfigs.values().next().value ?? { thresholdChars: 8192, headChars: 4096, tailChars: 1024 };
+    const prunerConfig = currentPrunerConfig();
     const estimate = estimatorOf(ctx.get('tokenMeter'));
     const result = previewSession(entries, pipeline, registry, estimate, prunerConfig);
     const view = buildView(entries);
@@ -245,8 +246,57 @@ export function apply(ctx, config) {
         items: step.items.slice(0, 200).map(item => ({ ...item, before: limitText(item.before), after: limitText(item.after) })),
         more: Math.max(0, step.items.length - 200),
       })),
+      manual: manualStatus(sessionId),
     };
   });
+
+  // "Compact now": DSH accepts tool-result replacements only inside an open
+  // turn (a replacement appended while idle makes the session log fail
+  // validation on reload), so a request is queued and applied at the start of
+  // the session's next model step, before compaction-basic's own check.
+  const queued = new Map();
+  const lastManual = new Map();
+  function manualStatus(sessionId) {
+    const agent = ctx.get('agents')?.get?.(sessionId);
+    return {
+      queuedAt: queued.get(sessionId)?.at ?? null,
+      last: lastManual.get(sessionId) ?? null,
+      agentStatus: agent?.status ?? 'none',
+    };
+  }
+  ctx.on('agent/pre-step', async (payload, next) => {
+    const session = payload?.agent?.session;
+    const request = session === undefined ? undefined : queued.get(session.id);
+    if (request !== undefined && payload.signal?.aborted !== true) {
+      queued.delete(session.id);
+      try {
+        const report = runPipeline({ session, meter: ctx.get('tokenMeter') ?? { estimateMessage: fallbackEstimate }, registry, pipeline: read('pipeline', DEFAULT_PIPELINE), prunerConfig: currentPrunerConfig(), logger });
+        const applied = report.steps.reduce((sum, step) => sum + step.applied, 0);
+        lastManual.set(session.id, { at: Date.now(), requestedAt: request.at, applied, tokensSaved: report.tokensSaved, steps: report.steps });
+        stats.runs.unshift({ at: Date.now(), sessionId: session.id, steps: report.steps, tokensSaved: report.tokensSaved, manual: true });
+        stats.runs.length = Math.min(stats.runs.length, 20);
+        logger.info?.(`compaction-manager: manual compaction on ${session.id}: ${applied} change(s), ~${report.tokensSaved} tokens`);
+      } catch (error) {
+        lastManual.set(session.id, { at: Date.now(), requestedAt: request.at, error: String(error?.message ?? error) });
+      }
+    }
+    return next();
+  });
+  ctx.effect(() => () => queued.clear(), 'compaction-manager: manual queue');
+
+  route('compact-now', async input => {
+    const sessionId = String(input.sessionId ?? '');
+    if (sessionId === '') throw new Error('sessionId is required');
+    if (input.cancel === true) {
+      queued.delete(sessionId);
+      return manualStatus(sessionId);
+    }
+    if (enabledSteps(read('pipeline', DEFAULT_PIPELINE), registry).length === 0) throw new Error('no compaction step is enabled');
+    queued.set(sessionId, { at: Date.now() });
+    return manualStatus(sessionId);
+  });
+
+  route('session-status', async input => manualStatus(String(input.sessionId ?? '')));
 
   logger.info?.(`compaction-manager: loaded (pruner hook ${integration.status.pruner ? 'on' : 'off'}, compaction-basic hook ${integration.status.basic ? 'on' : 'off'})`);
 }

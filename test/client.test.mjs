@@ -36,10 +36,10 @@ test('client bundle registers its slots and renders', { skip: React === undefine
     get: () => undefined,
   };
   mod.apply(ctx);
-  assert.deepEqual(registered.map(r => r.opts.name).sort(), ['main', 'plugins.bundle.config', 'sidebar.panellist']);
+  assert.deepEqual(registered.map(r => r.opts.name).sort(), ['conversation.view', 'main', 'plugins.bundle.config', 'sidebar.panellist']);
   // Components must be callable functions returning elements.
   for (const { comp } of registered) {
-    const el = comp({ view: 'summary', size: 18 });
+    const el = comp({ view: 'summary', size: 18, sessionId: 's1' });
     assert.ok(el === null || typeof el === 'object' || typeof el === 'string');
   }
 });

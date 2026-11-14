@@ -110,8 +110,7 @@ function CompactionPage({ ctx, form }) {
         h(RecallChooser, { value: current.recall, t, disabled: !writable, onChange: recall => edit({ recall }) })),
       h('section', { className: 'cm-section' },
         h('h2', null, t('sectionPreview')),
-        h('p', { className: 'cm-hint' }, t('previewHint')),
-        h(PreviewPanel, { pipeline: current.pipeline, methods: state.methods, lang, t })),
+        h('p', { className: 'cm-hint' }, t('previewMoved'))),
       h('section', { className: 'cm-section' },
         h('h2', null, t('recentRuns')),
         (state.stats?.runs ?? []).length === 0 ? h('p', { className: 'cm-hint' }, t('noRuns')) : h('div', { className: 'cm-items' },
@@ -148,5 +147,10 @@ function apply(ctx) {
   ctx.effect(() => ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
     name: 'sidebar.panellist', id: PANEL_ID, order: 40, locale: NS, label: () => makeT(ctx)('title'),
   }, props => h(CompactIcon, { size: typeof props?.size === 'number' ? props.size : 18 }))), 'compaction-manager: sidebar entry');
+  const View = props => h(SessionCompactionView, { ctx, sessionId: props?.sessionId });
+  ctx.effect(() => ctx.slots.inject('conversation.view', () => ctx.slots.register({
+    name: 'conversation.view', id: PANEL_ID, order: 40, locale: NS, label: () => makeT(ctx)('viewTab'),
+    inject: sessionId => ({ sessionId }),
+  }, View)), 'compaction-manager: conversation view');
   ctx.effect(() => ctx.slots.inject('plugins.bundle.config', () => ctx.slots.register({ name: 'plugins.bundle.config', key: PKG, locale: NS }, Card)), 'compaction-manager: plugins page card');
 }

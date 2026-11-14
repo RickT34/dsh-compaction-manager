@@ -7,7 +7,7 @@ A DeepSeek Harness plugin that puts context compaction in one panel:
 - **Ordered compaction steps.** When compaction triggers, the enabled steps run in the configured order. None of them calls a model. If the context is still over the threshold afterwards, `compaction-basic` writes its LLM summary as the fixed last step.
 - **Automatic compaction settings.** `compaction-basic` thresholds, retention, retries, summary model, and an auto on/off switch, applied at the next compaction without a restart.
 - **Recall.** Hidden content carries an id. The model can call `restore_context` to read the original back from the session log.
-- **Preview.** Simulates the edited steps on any session and shows per-item before/after text and estimated token savings. Nothing is written.
+- **Preview and compact now.** Each session gets a **Compaction** tab next to Chat and Trajectory. It previews the saved steps on that session, with per-item before/after text and estimated token savings, and has a **Compact now** button. DSH rewrites history only inside a model turn, so compact now runs right before the session's next model call.
 
 The default configuration behaves exactly like stock DSH: only the official head/tail pruner runs, and it delegates to the original implementation.
 

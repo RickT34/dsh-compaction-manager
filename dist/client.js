@@ -103,6 +103,21 @@ const zh = {
   kindFold: '折叠',
   showDiff: '查看对比',
   hideDiff: '收起对比',
+  previewMoved: '压缩预览已移到会话页顶部的「压缩」标签（与「对话」「轨迹」并列），在那里可以查看当前会话的压缩效果并立即压缩。',
+  viewTab: '压缩',
+  viewTitle: '压缩预览',
+  viewSteps: '已保存的步骤：{steps}',
+  viewNoSteps: '没有启用的压缩步骤，请先在压缩管理里启用。',
+  viewSettings: '压缩设置',
+  viewRefresh: '刷新预览',
+  viewNothing: '当前会话没有可压缩的内容。',
+  compactNow: '立即压缩',
+  compactNowHint: '立即压缩会按已保存的步骤执行下面预览中的改动，不调用模型。DSH 只允许在模型回合内改写历史，所以压缩会在这个会话下一次调用模型前执行：会话正在运行时几秒内生效，空闲时在你发出下一条消息时生效。',
+  queuedRunning: '已排队，会在下一次模型调用前执行…',
+  queuedIdle: '已排队：会话空闲中，发送下一条消息时执行。',
+  cancelQueued: '取消',
+  compactDone: '已压缩 {count} 处，减少约 {saved} token（{time}）。',
+  compactFailed: '压缩失败：',
   recentRuns: '最近执行',
   noRuns: '还没有执行记录',
 };
@@ -201,6 +216,21 @@ const en = {
   kindFold: 'fold',
   showDiff: 'Compare',
   hideDiff: 'Hide',
+  previewMoved: 'The preview moved to the Compaction tab at the top of each session (next to Chat and Trajectory), where you can preview the current session and compact it now.',
+  viewTab: 'Compaction',
+  viewTitle: 'Compaction preview',
+  viewSteps: 'Saved steps: {steps}',
+  viewNoSteps: 'No compaction step is enabled. Enable one in the Compaction panel.',
+  viewSettings: 'Settings',
+  viewRefresh: 'Refresh',
+  viewNothing: 'Nothing in this session would change.',
+  compactNow: 'Compact now',
+  compactNowHint: 'Compact now applies the changes previewed below using the saved steps, without any model call. DSH rewrites history only inside a model turn, so it runs right before this session’s next model call: within seconds while the session is running, or when you send the next message while it is idle.',
+  queuedRunning: 'Queued; runs before the next model call…',
+  queuedIdle: 'Queued; the session is idle, so it runs when you send the next message.',
+  cancelQueued: 'Cancel',
+  compactDone: 'Compacted {count} item(s), about −{saved} tokens ({time}).',
+  compactFailed: 'Compaction failed: ',
   recentRuns: 'Recent runs',
   noRuns: 'No runs yet',
 };
@@ -507,45 +537,97 @@ function PreviewStep({ step, methods, lang, t }) {
       step.more > 0 ? h('div', { className: 'cm-item cm-muted' }, fmt(t('more'), { count: step.more })) : null) : null);
 }
 
-function PreviewPanel({ pipeline, methods, lang, t }) {
-  const [sessions, setSessions] = React.useState(undefined);
-  const [sessionId, setSessionId] = React.useState('');
+// ---- session-view.js
+// Session view tab: preview of the saved pipeline on this session, with "compact now".
+function SessionCompactionView({ ctx, sessionId }) {
+  useStore(cb => ctx.locale.subscribe(cb), () => ctx.locale.getSnapshot?.().revision ?? langOf(ctx));
+  const t = makeT(ctx);
+  const lang = langOf(ctx);
+  const [state, setState] = React.useState(undefined);
+  const [result, setResult] = React.useState(undefined);
+  const [manual, setManual] = React.useState(undefined);
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState('');
-  const [result, setResult] = React.useState(undefined);
-  const load = React.useCallback(() => {
-    setError('');
-    callHost('sessions').then(list => {
-      setSessions(list);
-      setSessionId(current => current || list[0]?.id || '');
-    }, e => setError(String(e.message ?? e)));
-  }, []);
-  React.useEffect(load, [load]);
-  const run = () => {
+
+  const refresh = React.useCallback(async () => {
     if (!sessionId) return;
     setBusy(true);
     setError('');
-    callHost('preview', { sessionId, pipeline }).then(setResult, e => setError(String(e.message ?? e))).finally(() => setBusy(false));
+    try {
+      const nextState = await callHost('state');
+      setState(nextState);
+      const preview = await callHost('preview', { sessionId, pipeline: nextState.pipeline });
+      setResult(preview);
+      setManual(preview.manual);
+    } catch (e) {
+      setError(String(e?.message ?? e));
+    } finally {
+      setBusy(false);
+    }
+  }, [sessionId]);
+  React.useEffect(() => { setResult(undefined); setManual(undefined); refresh(); }, [refresh]);
+
+  // While a request waits for the next step, poll its status; refresh once it ran.
+  React.useEffect(() => {
+    if (!manual?.queuedAt) return undefined;
+    const lastAt = manual.last?.at ?? 0;
+    const timer = setInterval(async () => {
+      try {
+        const status = await callHost('session-status', { sessionId });
+        setManual(status);
+        if (!status.queuedAt && (status.last?.at ?? 0) > lastAt) refresh();
+      } catch { /* keep polling */ }
+    }, 2000);
+    return () => clearInterval(timer);
+  }, [manual?.queuedAt, manual?.last?.at, sessionId, refresh]);
+
+  const compactNow = async () => {
+    setError('');
+    try { setManual(await callHost('compact-now', { sessionId })); } catch (e) { setError(String(e?.message ?? e)); }
   };
+  const cancel = async () => {
+    try { setManual(await callHost('compact-now', { sessionId, cancel: true })); } catch (e) { setError(String(e?.message ?? e)); }
+  };
+  const openPanel = () => { try { ctx.get('layout')?.selectPanel(PANEL_ID); } catch { /* not registered */ } };
+
   const saved = result ? result.beforeTokens - result.afterTokens : 0;
   const percent = result && result.beforeTokens > 0 ? `${((saved / result.beforeTokens) * 100).toFixed(1)}%` : '0%';
-  const label = item => {
-    const when = item.createdAt ? new Date(item.createdAt).toLocaleString() : '';
-    return `${item.title || item.id}${item.live ? ` · ${t('liveSession')}` : ''}${when ? ` · ${when}` : ''}`;
-  };
-  return h('div', null,
-    h('div', { className: 'cm-row' },
-      h('select', { className: 'cm-select cm-grow', 'aria-label': t('pickSession'), value: sessionId, onChange: e => { setSessionId(e.target.value); setResult(undefined); } },
-        sessions === undefined ? h('option', { value: '' }, t('loading')) : sessions.length === 0 ? h('option', { value: '' }, t('noSessions')) : sessions.map(item => h('option', { key: item.id, value: item.id }, label(item)))),
-      h('button', { type: 'button', className: 'cm-btn', onClick: load }, t('refreshSessions')),
-      h('button', { type: 'button', className: 'cm-btn primary', disabled: busy || !sessionId, onClick: run }, busy ? t('previewing') : t('runPreview'))),
-    error ? h('p', { className: 'cm-msg err' }, error) : null,
-    result ? h('div', null,
-      h('div', { className: 'cm-total' },
-        h('b', null, fmt(t('beforeAfter'), { before: compact(result.beforeTokens), after: compact(result.afterTokens), saved: compact(saved), percent })),
-        h('span', { className: 'cm-muted' }, fmt(t('surfaceInfo'), { nodes: result.nodes, tools: result.toolResults }))),
-      h('div', { className: 'cm-meter' }, h('div', { style: { width: `${result.beforeTokens > 0 ? Math.max(0, Math.min(100, (result.afterTokens / result.beforeTokens) * 100)) : 100}%` } })),
-      result.steps.map(step => h(PreviewStep, { key: step.method, step, methods, lang, t }))) : null);
+  const enabled = (state?.pipeline ?? []).filter(step => step.enabled);
+  const names = enabled.map(step => state.methods.find(m => m.id === step.method)?.name?.[lang] ?? step.method);
+  const changes = result ? result.steps.reduce((sum, step) => sum + step.items.length + (step.more ?? 0), 0) : 0;
+
+  let manualLine = null;
+  if (manual?.queuedAt) {
+    manualLine = h('div', { className: 'cm-bar' },
+      h('span', { className: 'cm-msg cm-grow' }, manual.agentStatus === 'running' ? t('queuedRunning') : t('queuedIdle')),
+      h('button', { type: 'button', className: 'cm-btn', onClick: cancel }, t('cancelQueued')));
+  } else if (manual?.last) {
+    const last = manual.last;
+    manualLine = h('p', { className: `cm-msg ${last.error ? 'err' : 'ok'}` }, last.error
+      ? `${t('compactFailed')}${last.error}`
+      : fmt(t('compactDone'), { count: last.applied, saved: compact(last.tokensSaved), time: new Date(last.at).toLocaleTimeString() }));
+  }
+
+  return h('div', { className: 'cm-page' },
+    h('style', null, CSS),
+    h('div', { className: 'cm-inner', style: { maxWidth: 980, padding: '18px 20px 48px', gap: 14 } },
+      h('div', { className: 'cm-row' },
+        h('div', { className: 'cm-grow' },
+          h('div', { className: 'cm-name' }, t('viewTitle')),
+          h('div', { className: 'cm-hint', style: { margin: 0 } }, names.length > 0 ? fmt(t('viewSteps'), { steps: names.join(' → ') }) : t('viewNoSteps'))),
+        h('button', { type: 'button', className: 'cm-btn', onClick: openPanel }, t('viewSettings')),
+        h('button', { type: 'button', className: 'cm-btn', disabled: busy, onClick: refresh }, busy ? t('previewing') : t('viewRefresh')),
+        h('button', { type: 'button', className: 'cm-btn primary', disabled: busy || !result || changes === 0 || Boolean(manual?.queuedAt), onClick: compactNow }, t('compactNow'))),
+      h('p', { className: 'cm-hint', style: { margin: 0 } }, t('compactNowHint')),
+      manualLine,
+      error ? h('p', { className: 'cm-msg err' }, error) : null,
+      result ? h('div', null,
+        h('div', { className: 'cm-total' },
+          h('b', null, fmt(t('beforeAfter'), { before: compact(result.beforeTokens), after: compact(result.afterTokens), saved: compact(saved), percent })),
+          h('span', { className: 'cm-muted' }, fmt(t('surfaceInfo'), { nodes: result.nodes, tools: result.toolResults }))),
+        h('div', { className: 'cm-meter' }, h('div', { style: { width: `${result.beforeTokens > 0 ? Math.max(0, Math.min(100, (result.afterTokens / result.beforeTokens) * 100)) : 100}%` } })),
+        changes === 0 ? h('p', { className: 'cm-hint' }, t('viewNothing')) : null,
+        result.steps.filter(step => step.enabled).map(step => h(PreviewStep, { key: step.method, step, methods: state.methods, lang, t }))) : (busy ? h('p', { className: 'cm-muted' }, t('previewing')) : null)));
 }
 
 // ---- page.js
@@ -661,8 +743,7 @@ function CompactionPage({ ctx, form }) {
         h(RecallChooser, { value: current.recall, t, disabled: !writable, onChange: recall => edit({ recall }) })),
       h('section', { className: 'cm-section' },
         h('h2', null, t('sectionPreview')),
-        h('p', { className: 'cm-hint' }, t('previewHint')),
-        h(PreviewPanel, { pipeline: current.pipeline, methods: state.methods, lang, t })),
+        h('p', { className: 'cm-hint' }, t('previewMoved'))),
       h('section', { className: 'cm-section' },
         h('h2', null, t('recentRuns')),
         (state.stats?.runs ?? []).length === 0 ? h('p', { className: 'cm-hint' }, t('noRuns')) : h('div', { className: 'cm-items' },
@@ -699,6 +780,11 @@ function apply(ctx) {
   ctx.effect(() => ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
     name: 'sidebar.panellist', id: PANEL_ID, order: 40, locale: NS, label: () => makeT(ctx)('title'),
   }, props => h(CompactIcon, { size: typeof props?.size === 'number' ? props.size : 18 }))), 'compaction-manager: sidebar entry');
+  const View = props => h(SessionCompactionView, { ctx, sessionId: props?.sessionId });
+  ctx.effect(() => ctx.slots.inject('conversation.view', () => ctx.slots.register({
+    name: 'conversation.view', id: PANEL_ID, order: 40, locale: NS, label: () => makeT(ctx)('viewTab'),
+    inject: sessionId => ({ sessionId }),
+  }, View)), 'compaction-manager: conversation view');
   ctx.effect(() => ctx.slots.inject('plugins.bundle.config', () => ctx.slots.register({ name: 'plugins.bundle.config', key: PKG, locale: NS }, Card)), 'compaction-manager: plugins page card');
 }
 

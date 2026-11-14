@@ -12,7 +12,10 @@ function fakeCtx() {
   const effects = [];
   const provided = {};
   const sessions = new Map();
+  const listeners = new Map();
   return {
+    listeners,
+    on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name); },
     routes, toolDefs: tools, effects, liveSessions: sessions, provided,
     logger: { info() {}, warn() {}, debug() {} },
     effect(fn) { effects.push(fn()); },
@@ -81,6 +84,37 @@ test('configured pipeline runs inside the pruner hook; preview and restore work'
     assert.match(rendered, /offset=/);
     const bad = await call(ctx, 'validate', { basic: { thresholdRatio: 2 } });
     assert.equal(bad.ok, false);
+  } finally {
+    for (const fn of ctx.effects) if (typeof fn === 'function') fn();
+  }
+});
+
+test('compact-now queues and runs at the next pre-step inside the turn', async () => {
+  const ctx = fakeCtx();
+  host.apply(ctx, host.Config({ pipeline: [{ method: 'magic-compact', enabled: true, options: { keepRecent: 0 } }] }));
+  try {
+    const session = makeSession([[{ name: 'bash', args: { command: 'cat big' }, result: 'w '.repeat(800) }], [{ name: 'bash', args: {}, result: 'ok' }]]);
+    ctx.liveSessions.set(session.id, session);
+    const queued = await call(ctx, 'compact-now', { sessionId: session.id });
+    assert.equal(queued.ok, true, JSON.stringify(queued));
+    assert.ok(queued.value.queuedAt > 0);
+    const before = session.seq;
+    session.append('turn/start', { turn: 3 });
+    let nextCalled = false;
+    await ctx.listeners.get('agent/pre-step')({ agent: { session }, signal: new AbortController().signal }, async () => { nextCalled = true; return {}; });
+    assert.ok(nextCalled);
+    assert.ok(session.seq > before + 1, 'replacement events appended');
+    const status = await call(ctx, 'session-status', { sessionId: session.id });
+    assert.equal(status.value.queuedAt, null);
+    assert.equal(status.value.last.applied, 1);
+    // a second pre-step does nothing
+    const after = session.seq;
+    await ctx.listeners.get('agent/pre-step')({ agent: { session }, signal: new AbortController().signal }, async () => ({}));
+    assert.equal(session.seq, after);
+    // cancel path
+    await call(ctx, 'compact-now', { sessionId: session.id });
+    const cancelled = await call(ctx, 'compact-now', { sessionId: session.id, cancel: true });
+    assert.equal(cancelled.value.queuedAt, null);
   } finally {
     for (const fn of ctx.effects) if (typeof fn === 'function') fn();
   }
