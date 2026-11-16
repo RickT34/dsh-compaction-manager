@@ -2,11 +2,27 @@
 
 English | [中文](README.zh.md)
 
-A DeepSeek Harness plugin that manages context compaction from one panel. It lets you build an ordered list of compaction steps that never call a model, tune the official LLM summary, and let the model restore anything a step hid.
+**Keep long agent sessions small without asking a model to summarize them.**
 
-Installed with no configuration, it behaves exactly like stock DSH: the only step is the official head/tail trim, and it runs through the original implementation.
+In a long DeepSeek Harness session, most of the context is old tool output and tool call arguments: file reads, search results, command logs, whole files passed to `write`. Stock DSH trims only results over 8192 characters, then asks a model to summarize the oldest history. That summary costs an extra request and loses the details the agent may need later.
+
+This plugin adds a model-free stage in front of the summary. Ordered steps hide old, bulky, duplicate or failed tool calls and leave a short notice in their place. The notice keeps the call's full description and an id, so the model can call `restore_context` to read the original back. If the steps bring the context under the threshold, the LLM summary does not run at all.
 
 ![Compaction panel](assets/screenshot-steps-en.png)
+
+## What you get
+
+- **No model calls.** Every step runs locally on the session history, so it adds no requests and no cost.
+- **Nothing is lost.** Hidden content stays in the session log. The model sees what each call was for and can restore any part of it by id.
+- **Tool call arguments, too.** Besides outputs, steps can fold whole tool calls, such as a `write` that carried an entire file, down to a summary or just the call's description.
+- **Building blocks and presets.** Six single-purpose methods (trim, omit, deduplicate, drop superseded reads, purge failures, fold) can be combined in any order and repeated with different settings. Presets modeled on Magic Compact and OpenCode DCP, plus an aggressive one, get you started. Save, import and export your own.
+- **See it before it happens.** Each session gets a **Compaction** tab showing every change the steps would make, with the text before and after and the estimated tokens saved. **Compact now** applies them.
+- **One place for all compaction settings.** The official summary's threshold, retention, retries and summary model are in the same panel and apply without a restart.
+- **Safe by default.** With no configuration it behaves exactly like stock DSH. Sessions stay readable after the plugin is removed.
+
+On the session this plugin was developed in (about 470k estimated tokens, 380 tool results), a pipeline of deduplication, failed-call purging, two folding steps and the official trim cut the estimate by 31% without any model call.
+
+![Session compaction tab](assets/screenshot-preview-en.png)
 
 ## Install
 
@@ -102,8 +118,6 @@ A bare array of presets, or a single preset object, is accepted as well. Imports
 - **Recent runs**: the last 20 pipeline runs, with the number of changes per step and the estimated tokens saved.
 
 ## Session tab: preview and compact now
-
-![Session compaction tab](assets/screenshot-preview-en.png)
 
 The **Compaction** tab simulates the saved steps on the current session without writing anything. It shows the estimated token count before and after, and every change each step would make, with the text before and after.
 
