@@ -2,18 +2,11 @@
 
 English | [中文](README.zh.md)
 
-A DeepSeek Harness plugin that puts context compaction in one panel:
+A DeepSeek Harness plugin that manages context compaction from one panel. It lets you build an ordered list of compaction steps that never call a model, tune the official LLM summary, and let the model restore anything a step hid.
 
-- **Ordered compaction steps.** When compaction triggers, the enabled steps run in the configured order. None of them calls a model. If the context is still over the threshold afterwards, `compaction-basic` writes its LLM summary as the fixed last step.
-- **Automatic compaction settings.** `compaction-basic` thresholds, retention, retries, summary model, and an auto on/off switch, applied at the next compaction without a restart.
-- **Recall.** Hidden content carries an id. The model can call `restore_context` to read the original back from the session log.
-- **Preview and compact now.** Each session gets a **Compaction** tab next to Chat and Trajectory. It previews the saved steps on that session, with per-item before/after text and estimated token savings, and has a **Compact now** button. DSH rewrites history only inside a model turn, so compact now runs right before the session's next model call.
+Installed with no configuration, it behaves exactly like stock DSH: the only step is the official head/tail trim, and it runs through the original implementation.
 
-The default configuration behaves exactly like stock DSH: only the official head/tail pruner runs, and it delegates to the original implementation.
-
-![Compaction steps](assets/screenshot-steps-en.png)
-
-![Preview](assets/screenshot-preview-en.png)
+![Compaction panel](assets/screenshot-steps-en.png)
 
 ## Install
 
@@ -23,66 +16,141 @@ Requires DeepSeek Harness `>=0.2.2-rc.1 <0.3.0`.
 dsh plugin --profile web add dsh-compaction-manager
 ```
 
-Or in the Web app: **Plugins → Add plugin**, enter `dsh-compaction-manager`. The panel appears in the sidebar as **Compaction**, and on the plugin's page under **Plugins**.
+Or in the Web app, open **Plugins → Add plugin** and enter `dsh-compaction-manager`. To install the latest commit from GitHub instead of the npm release, use `github:RickT34/dsh-compaction-manager`.
 
-To install the latest commit from GitHub instead of the npm release, use `github:RickT34/dsh-compaction-manager`.
+After installing:
 
-## Methods and presets
+- **Compaction** in the sidebar opens the settings panel. The plugin's page under **Plugins** links to it too.
+- Each session gets a **Compaction** tab next to Chat and Trajectory, with a preview and a **Compact now** button.
 
-Each method does one kind of change with one selection rule. A step is one method with its own options and tool scope (`tools` / `excludeTools`); the same method can appear in several steps.
+## How compaction runs
 
-| Method | What it does | Restorable |
-|---|---|---|
-| Head/tail trim | Keeps the head and tail of results over 8192 chars; identical to the official pruner with default options | Only with "Include recall id" |
-| Omit output | Replaces older results over a character or word threshold with a one-line notice | Yes |
-| Deduplicate calls | Keeps only the newest result of calls with identical tool and arguments | Yes |
-| Drop superseded reads | Replaces a read made stale by a later write, edit, or full read of the same path | Yes |
-| Purge failed calls | Folds call groups that all failed some turns ago into tool name, description, and error | Yes |
-| Fold tool calls | Replaces an older call group (arguments and results) over a threshold with text; detail level is a summary or the description only | Yes |
+DSH compacts when a request would exceed the threshold, when the provider reports a context overflow, or when you switch models. With this plugin installed, compaction runs in two stages:
 
-Every notice keeps the call's `description` argument in full.
+1. **Steps.** The enabled steps run in order. Each step rewrites some old tool results or tool call groups and never calls a model.
+2. **LLM summary.** If the context is still over the threshold, `compaction-basic` replaces the oldest history with a model-written summary. This stage is always last. Its settings are in the panel (see [Panel settings](#panel-settings)).
 
-Presets are ready-made step lists. Applying one replaces the steps, which you can then edit. **Save as preset** stores the steps being edited as a custom preset (saving under an existing custom name replaces it), and custom presets can be deleted. **Export** writes one or all custom presets to a JSON file; **Import** reads such a file back, validates every step, and adds the presets that pass, renaming any name that already exists.
+Notices left by the steps keep the call's `description` argument in full and carry an id. Head/tail trim is the exception: it leaves the call untouched and adds an id only when **Include recall id** is on. While any enabled step leaves ids, the model gets a `restore_context` tool that returns the original content for an id.
+
+## Methods
+
+Each method does one kind of change with one selection rule. A step is one method plus its own options. The same method can appear in several steps with different options. For example, the Magic Compact preset uses three Omit output steps with different thresholds for different tools.
+
+Most methods have a tool scope: **Only these tools** (empty means all) and **Skip these tools**. Skip these tools starts with `ask_user_question`, `todo_write` and `restore_context`; Deduplicate calls also skips `skill`, `subagent` and `subagent_fork`, and head/tail trim skips nothing, like the official pruner. Drop superseded reads uses its own lists of read and write tools instead.
+
+| Method | What it does | Main options (defaults) | Restorable |
+|---|---|---|---|
+| Head/tail trim | Results over the threshold keep their head and tail, with a fixed marker in between. With default options it matches the official `tool-result-pruner` byte for byte. | threshold 8192, head 4096, tail 1024 chars | Only with **Include recall id** |
+| Omit output | Older results over a character or word threshold become a one-line notice: tool, key arguments, full description, size, id. | 1024 chars, words off, keep newest 3, skip failed results | Yes |
+| Deduplicate calls | For calls with the same tool and identical arguments, only the newest result stays. Older ones point to it. | minimum 200 chars, keep newest 2 | Yes |
+| Drop superseded reads | A read result is replaced once the same path is later written, edited, or fully read again. | read tools `read`; write tools `write`, `edit` | Yes |
+| Purge failed calls | A call group in which every call failed is folded to tool names, descriptions and error messages once it is old enough. | 4 turns, keep newest 2 | Yes |
+| Fold tool calls | An older call group, arguments and results together, is replaced with text. **Summary** keeps key arguments, status, size and the head of each result. **Description only** keeps just each tool name and description. | over 8192 chars in total, or over 1024 chars of arguments; keep newest 4 groups | Yes |
+
+DSH does not allow rewriting tool call arguments on their own. Purge failed calls and Fold tool calls therefore replace a closed assistant tool-call message and its results with a single user message. After that the model no longer sees native tool-call structure for that group, and reasoning blocks in it no longer apply.
+
+Results the model has not answered yet are never touched. The one exception is head/tail trim, which matches the official pruner and processes every result.
+
+## Presets
+
+A preset is a ready-made list of steps. **Apply** replaces the current steps, which you can then edit before saving. The preset that matches the current steps is marked **Current**.
 
 | Preset | Steps |
 |---|---|
-| Official default (default) | Head/tail trim. Behaves exactly like stock DSH. |
-| Magic Compact | Omit output three times (reloadable tools over 200 chars, subagent and job tools over 4096, others over 1024 chars or 128 words), then head/tail trim. After aerovato/magic-compact `/magic-trim`. |
-| OpenCode DCP | Deduplicate, drop superseded reads (off), purge failed calls after 4 turns, head/tail trim. After Opencode-DCP. |
-| Aggressive | Deduplicate, purge failed calls, fold calls over 4096 chars to descriptions only, fold calls with arguments over 1024 chars to a summary, head/tail trim. |
+| Official default (default) | Head/tail trim. |
+| Magic Compact | Omit output for `read`, `read_image`, `skill`, `web_fetch` over 200 chars; Omit output for subagent and job tools over 4096 chars; Omit output for all other tools over 1024 chars or 128 words; head/tail trim. After the model-free `/magic-trim` rules of [aerovato/magic-compact](https://github.com/aerovato/magic-compact). |
+| OpenCode DCP | Deduplicate; drop superseded reads (off); purge failed calls after 4 turns; head/tail trim. After the automatic strategies of [Opencode-DCP](https://github.com/Tarquinen/opencode-dynamic-context-pruning). |
+| Aggressive | Deduplicate; purge failed calls; fold calls over 4096 chars to descriptions only; fold calls with over 1024 chars of arguments to a summary; head/tail trim. |
 
-Folding replaces a closed assistant tool-call message and its results with one user message, because DSH does not allow rewriting tool-call arguments on their own. Pipelines saved by 0.1.x are migrated to the equivalent steps when read.
+Neither Magic Compact nor OpenCode DCP is ported in full. The parts of those projects that call a model (Magic Compact's turn summaries, DCP's `compress` tool) are not implemented.
+
+### Custom presets
+
+- **Save as preset** stores the steps being edited, including unsaved changes, under a name and an optional description. Saving under the name of an existing custom preset replaces it.
+- **Delete** on a custom preset asks for a second click to confirm.
+- **Export** on a custom preset downloads it as JSON. **Export all custom presets** downloads every one.
+- **Import** reads such a file. Each preset is validated, valid presets are added, a name that already exists gets a number appended, and the reason for each rejected preset is listed.
+
+Saving, deleting and importing are written to the settings at once, separately from the step draft. Built-in presets cannot be deleted or exported; apply one and save it under your own name to share it.
+
+The file format:
+
+```json
+{
+  "format": "dsh-compaction-manager.presets",
+  "version": 1,
+  "presets": [
+    {
+      "name": "Trim reads early",
+      "summary": "Omit read output over 500 chars, then the official trim.",
+      "steps": [
+        { "method": "omit-output", "options": { "tools": ["read"], "minChars": 500 } },
+        { "method": "trim-head-tail" }
+      ]
+    }
+  ]
+}
+```
+
+A bare array of presets, or a single preset object, is accepted as well. Imports are limited to 200 KB, 50 presets per file, 50 steps per preset, 60-character names and 400-character descriptions. Step options must satisfy the method's own rules. A preset that uses a method from a plugin you have not installed still imports, with a warning.
+
+## Panel settings
+
+- **Compaction steps and order**: presets, custom presets, and the step list. You can add, remove, reorder, enable and configure steps. **Save** applies the steps at the next compaction; no restart is needed.
+- **Automatic compaction (compaction-basic)**: automatic compaction on or off, `thresholdRatio`, `retainRatio` or `retainTokens`, `headroomTokens`, summary `maxTokens`, summary retries, overflow recoveries, and the summary provider and model. A blank field keeps the official value, and the placeholder shows the value in effect. Turning automatic compaction off also stops overflow recovery; `/compact` still works.
+- **Recall tool restore_context**: *Auto* offers the tool only while an enabled step leaves ids. *Always* and *Never* override that.
+- **Recent runs**: the last 20 pipeline runs, with the number of changes per step and the estimated tokens saved.
+
+## Session tab: preview and compact now
+
+![Session compaction tab](assets/screenshot-preview-en.png)
+
+The **Compaction** tab simulates the saved steps on the current session without writing anything. It shows the estimated token count before and after, and every change each step would make, with the text before and after.
+
+**Compact now** applies those changes without a model call. DSH accepts history rewrites only inside a model turn, so the request is queued and runs right before the session's next model call: within seconds while the session is running, or when you send the next message while it is idle. A queued request can be cancelled. Compact now runs only the steps; for an LLM summary, use `/compact`.
+
+## restore_context
+
+```text
+restore_context(id, offset?, max_chars?)
+```
+
+- `id` is `r<seq>` for a single tool result, or `c<seq>` for a folded tool call group.
+- The tool returns the original text from the session log, up to `max_chars` (1–60000, default 20000) starting at `offset`. Longer content tells the model which offset to request next.
+- It is read-only and stores nothing extra; the originals are already in the session log.
 
 ## How it hooks in
 
-The Web app mounts `compaction-basic` and `tool-result-pruner` inside each agent preset. This plugin wraps their prototypes while it is loaded:
+The Web app mounts `compaction-basic` and `tool-result-pruner` inside each agent preset, where another plugin cannot replace the services. While this plugin is loaded, it wraps their prototypes:
 
-- `ToolResultPruner.prototype.pruneSession` runs the configured steps.
-- `BasicCompactionEngine.prototype` methods apply panel overrides of the compaction policy.
+- `ToolResultPruner.prototype.pruneSession` runs the configured steps. When the steps are exactly the default, it calls the original method unchanged.
+- The `BasicCompactionEngine.prototype` methods apply the panel's overrides of the compaction policy. With no overrides, the engine's own configuration is used as is.
 
-Unloading the plugin restores the originals. Every replacement uses the same replay-safe events as the official pruner (`compaction/prune` followed by a surface `replace`), so sessions stay readable without this plugin.
+Unloading the plugin restores the original methods. Every rewrite uses the same replay-safe events as the official pruner (`compaction/prune` followed by a surface `replace`), so sessions stay readable after the plugin is removed. Pipelines saved by 0.1.x, whose methods were the presets themselves, are converted to the equivalent steps when read.
 
 ## Extending
 
-Other plugins can add methods and presets:
+Other plugins can register methods and presets through the `compactionMethods` service. Both calls return a disposer.
 
 ```js
 export const inject = ['compactionMethods']
+
 export function apply(ctx) {
   ctx.effect(() => ctx.compactionMethods.register({
     id: 'my-method',
     name: { zh: '我的方法', en: 'My method' },
     summary: { zh: '…', en: '…' },
     details: { zh: '…', en: '…' },
-    options: [{ key: 'minChars', type: 'number', label: { en: 'Min chars' }, default: 500 }],
-    recall: () => true,
-    // view.nodes: [{ seq, rootSeq, type, text, chars, toolName, args, isError, pending, turn, ... }]
+    options: [{ key: 'minChars', type: 'number', label: { zh: '最小字符数', en: 'Min chars' }, default: 500 }],
+    tagKeys: ['minChars'],          // options shown on the step card
+    recall: () => true,             // whether this method leaves restore_context ids
     plan(view, options) {
       return view.nodes
         .filter(n => n.type === 'tool' && !n.pending && n.chars > options.minChars)
         .map(n => ({ type: 'result', seq: n.seq, content: [{ type: 'text', text: `[compacted · id=r${n.rootSeq}] …` }] }))
     },
   }))
+
   ctx.effect(() => ctx.compactionMethods.registerPreset({
     id: 'my-preset',
     name: { zh: '我的预设', en: 'My preset' },
@@ -92,15 +160,31 @@ export function apply(ctx) {
 }
 ```
 
-`plan` must be pure. Candidates are `{ type: 'result', seq, content }` (rewrite one tool result) or `{ type: 'fold', startSeq, endSeq, content }` (replace a closed tool-call group with a user message). Notices that start with `[compacted` are skipped by the built-in methods; ids `r<seq>` and `c<seq>` work with `restore_context`.
+- Option types are `number`, `boolean`, `string`, `list` and `select`. The panel builds the form from these declarations.
+- `view.nodes` lists the visible messages in order. Each node has `seq`, `rootSeq`, `type` (`user`, `assistant`, `tool`, …), `text`, `chars` and `turn`. Tool nodes also have `toolName`, `args`, `isError` and `pending`.
+- `plan` must not change anything. It returns candidates of two kinds:
+  - `{ type: 'result', seq, content }` rewrites one tool result.
+  - `{ type: 'fold', startSeq, endSeq, content }` replaces a closed tool call group with one user message.
+- Built-in methods skip content that starts with `[compacted`. Notices that use the ids `r<rootSeq>` and `c<rootSeq>` work with `restore_context`.
 
 ## Development
 
 ```sh
-npm run link-dsh   # link DSH packages from the local `dsh` installation (needed by the tests)
+npm run link-dsh   # link the DSH packages the tests need from the local dsh installation
 npm test           # node --test test/*.test.mjs
-npm run build      # regenerates dist/client.js from src/client/*.js
+npm run build      # regenerate dist/client.js from src/client/*.js
 ```
+
+| Path | Contents |
+|---|---|
+| `src/core.js` | Surface view, candidate simulation, notice text, preview |
+| `src/methods.js` | Built-in methods |
+| `src/presets.js` | Built-in presets and 0.1.x migration |
+| `src/user-presets.js` | Validation, saving and import/export of custom presets |
+| `src/registry.js` | Method and preset registry, pipeline normalization |
+| `src/integration.js` | Wrappers around the official compaction classes |
+| `src/host.js` | Settings schema, HTTP routes, `restore_context`, compact now |
+| `src/client/` | Panel and session tab (built into `dist/client.js`) |
 
 `dist/client.js` is committed so that installing from GitHub needs no build step. Rebuild and commit it after changing `src/client/`.
 
