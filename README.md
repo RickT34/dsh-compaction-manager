@@ -42,7 +42,7 @@ Each method does one kind of change with one selection rule. A step is one metho
 
 Every notice keeps the call's `description` argument in full.
 
-Presets are ready-made step lists. Applying one replaces the steps, which you can then edit.
+Presets are ready-made step lists. Applying one replaces the steps, which you can then edit. **Save as preset** stores the steps being edited as a custom preset (saving under an existing custom name replaces it), and custom presets can be deleted. **Export** writes one or all custom presets to a JSON file; **Import** reads such a file back, validates every step, and adds the presets that pass, renaming any name that already exists.
 
 | Preset | Steps |
 |---|---|

@@ -4,7 +4,7 @@ import { resolveOptions } from './core.js';
 import { BUILTIN_METHODS } from './methods.js';
 import { BUILTIN_PRESETS, DEFAULT_PIPELINE, migrateLegacyStep } from './presets.js';
 
-const ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+export const ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const OPTION_TYPES = ['number', 'boolean', 'string', 'list', 'select'];
 
 function localized(value, fallback = '') {

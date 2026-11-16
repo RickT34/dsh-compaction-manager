@@ -84,6 +84,8 @@ const CSS = `
 .cm-presets{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:8px}
 .cm-preset{border:1px solid var(--dsw-alias-border-l2);border-radius:10px;padding:10px 12px;background:var(--dsw-alias-bg-base);display:flex;flex-direction:column;gap:4px}
 .cm-preset.active{border-color:var(--dsw-alias-state-business-primary)}
+.cm-warn{color:var(--dsw-alias-state-warn-primary)}
+.cm-btn.ghost.danger{color:var(--dsw-alias-state-error-primary)}
 .cm-add{border:1px dashed var(--dsw-alias-border-l3);border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:6px}
 .cm-bar{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:10px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2)}
 .cm-msg{font-size:12.5px;color:var(--dsw-alias-label-secondary)}

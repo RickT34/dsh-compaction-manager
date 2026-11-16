@@ -266,3 +266,53 @@ test('aggressive preset keeps descriptions for large calls and summaries for lar
   assert.match(texts, /original call structure folded[\s\S]*write\(file_path=\/w\.js/);
   assert.match(texts, /description: write the helper/);
 });
+
+test('user presets: clean untrusted input, save, merge imports, export round trip', async () => {
+  const up = await import('../src/user-presets.js');
+  const registry = new MethodRegistry();
+  const good = { name: '  My  preset ', summary: 'x', steps: [{ method: 'omit-output', options: { minChars: 500, tools: ['read'] } }, { method: 'trim-head-tail' }] };
+  const cleaned = up.cleanPreset(good, registry);
+  assert.equal(cleaned.name, 'My preset');
+  assert.deepEqual(cleaned.steps.map(s => s.id), ['omit-output', 'trim-head-tail']);
+  // invalid inputs
+  assert.throws(() => up.cleanPreset({ name: '', steps: [{ method: 'dedupe' }] }, registry), /name/);
+  assert.throws(() => up.cleanPreset({ name: 'a', steps: [] }, registry), /step/);
+  assert.throws(() => up.cleanPreset({ name: 'a', steps: [{ method: 'Bad Id' }] }, registry), /method id/);
+  assert.throws(() => up.cleanPreset({ name: 'a', steps: [{ method: 'trim-head-tail', options: { headChars: 9000 } }] }, registry), /thresholdChars/);
+  assert.throws(() => up.cleanPreset({ name: 'a', steps: [{ method: 'dedupe', options: [] }] }, registry), /options/);
+  const proto = up.cleanPreset(JSON.parse('{"name":"p","steps":[{"method":"dedupe","options":{"__proto__":{"x":1},"minChars":10}}]}'), registry);
+  assert.deepEqual(proto.steps[0].options, { minChars: 10 });
+  assert.equal(({}).x, undefined);
+  const unknown = up.cleanPreset({ name: 'u', steps: [{ method: 'not-installed' }] }, registry);
+  assert.match(unknown.warnings[0], /not installed/);
+  // save: new, then same name replaces in place
+  let { userPresets, replaced } = up.savePreset([], cleaned);
+  assert.equal(replaced, false);
+  const firstId = userPresets[0].id;
+  ({ userPresets, replaced } = up.savePreset(userPresets, { ...cleaned, summary: 'changed' }));
+  assert.equal(replaced, true);
+  assert.equal(userPresets.length, 1);
+  assert.equal(userPresets[0].id, firstId);
+  // export → import keeps steps, renames duplicates, assigns new ids
+  const file = JSON.parse(JSON.stringify(up.exportFile(userPresets)));
+  assert.equal(file.format, up.PRESET_FILE_FORMAT);
+  const parsed = up.parsePresetFile(file, registry);
+  assert.equal(parsed.errors.length, 0);
+  const merged = up.mergeImported(userPresets, parsed.presets);
+  assert.equal(merged.userPresets.length, 2);
+  assert.equal(merged.added[0].name, 'My preset (2)');
+  assert.notEqual(merged.added[0].id, firstId);
+  assert.deepEqual(merged.added[0].steps, userPresets[0].steps);
+  // partial failures are reported, not fatal; other shapes accepted
+  const mixed = up.parsePresetFile({ presets: [good, { name: 'bad' }] }, registry);
+  assert.equal(mixed.presets.length, 1);
+  assert.match(mixed.errors[0], /#2 \(bad\)/);
+  assert.equal(up.parsePresetFile([good], registry).presets.length, 1);
+  assert.equal(up.parsePresetFile(good, registry).presets.length, 1);
+  assert.throws(() => up.parsePresetFile({ format: 'other', presets: [good] }, registry), /not a compaction preset file/);
+  assert.throws(() => up.parsePresetFile({ version: 99, presets: [good] }, registry), /newer/);
+  // stored list: malformed entries dropped, ids stable
+  const stored = up.storedUserPresets([{ id: firstId, ...good }, { id: 'x', name: 'broken' }], registry);
+  assert.equal(stored.length, 1);
+  assert.equal(stored[0].id, firstId);
+});

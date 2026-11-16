@@ -121,3 +121,30 @@ test('compact-now queues and runs at the next pre-step inside the turn', async (
     for (const fn of ctx.effects) if (typeof fn === 'function') fn();
   }
 });
+
+test('preset routes validate, merge, and export user presets', async () => {
+  const ctx = fakeCtx();
+  const stored = [{ id: 'user-a', name: 'Mine', summary: '', steps: [{ id: 'dedupe', method: 'dedupe', enabled: true, options: {} }] }];
+  host.apply(ctx, host.Config({ userPresets: stored }));
+  try {
+    const state = await call(ctx, 'state');
+    const user = state.value.presets.filter(p => p.user);
+    assert.deepEqual(user.map(p => [p.id, p.name.zh]), [['user-a', 'Mine']]);
+    const saved = await call(ctx, 'presets/save', { name: 'Mine', summary: 'new', steps: [{ method: 'trim-head-tail' }] });
+    assert.equal(saved.ok, true, JSON.stringify(saved));
+    assert.equal(saved.value.replaced, true);
+    assert.equal(saved.value.userPresets[0].id, 'user-a');
+    const bad = await call(ctx, 'presets/save', { name: '', steps: [] });
+    assert.equal(bad.ok, false);
+    const exported = await call(ctx, 'presets/export', { ids: ['user-a'] });
+    assert.equal(exported.value.presets[0].name, 'Mine');
+    const imported = await call(ctx, 'presets/import', { text: JSON.stringify(exported.value) });
+    assert.equal(imported.ok, true, JSON.stringify(imported));
+    assert.deepEqual(imported.value.added.map(p => p.name), ['Mine (2)']);
+    assert.equal(imported.value.userPresets.length, 2);
+    const notJson = await call(ctx, 'presets/import', { text: '{oops' });
+    assert.match(notJson.error, /not valid JSON/);
+  } finally {
+    for (const fn of ctx.effects) if (typeof fn === 'function') fn();
+  }
+});

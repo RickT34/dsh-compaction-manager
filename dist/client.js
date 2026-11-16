@@ -43,6 +43,25 @@ const zh = {
   noSteps: '没有步骤：压缩触发时直接交给 compaction-basic 做 LLM 摘要。',
   addStep: '添加步骤',
   removeStep: '删除步骤',
+  presetUser: '自定义',
+  saveAsPreset: '保存为预设',
+  importPresets: '导入',
+  exportAll: '导出全部自定义预设',
+  exportPreset: '导出',
+  removePreset: '删除',
+  removeConfirm: '确认删除？',
+  presetName: '预设名称',
+  presetSummary: '说明（可选）',
+  presetOverwrite: '已有同名的自定义预设，保存后会覆盖它。',
+  presetSaveHint: '保存当前编辑中的 {count} 个步骤（包括未保存的修改）。',
+  savePreset: '保存预设',
+  cancel: '取消',
+  presetSaved: '已保存预设「{name}」。',
+  presetReplaced: '已更新预设「{name}」。',
+  presetRemoved: '已删除预设。',
+  presetFailed: '操作失败：',
+  importDone: '导入了 {count} 个预设，{failed} 个失败。',
+  importTooLarge: '文件超过 {size} KB。',
   tagOnly: '仅',
   tagExclude: '排除',
   moveUp: '上移',
@@ -165,6 +184,25 @@ const en = {
   noSteps: 'No steps: on a compaction trigger, compaction-basic writes its LLM summary directly.',
   addStep: 'Add step',
   removeStep: 'Remove step',
+  presetUser: 'Custom',
+  saveAsPreset: 'Save as preset',
+  importPresets: 'Import',
+  exportAll: 'Export all custom presets',
+  exportPreset: 'Export',
+  removePreset: 'Delete',
+  removeConfirm: 'Confirm delete?',
+  presetName: 'Preset name',
+  presetSummary: 'Description (optional)',
+  presetOverwrite: 'A custom preset with this name exists; saving replaces it.',
+  presetSaveHint: 'Saves the {count} step(s) being edited, including unsaved changes.',
+  savePreset: 'Save preset',
+  cancel: 'Cancel',
+  presetSaved: 'Saved preset “{name}”.',
+  presetReplaced: 'Updated preset “{name}”.',
+  presetRemoved: 'Preset deleted.',
+  presetFailed: 'Failed: ',
+  importDone: 'Imported {count} preset(s); {failed} failed.',
+  importTooLarge: 'The file is larger than {size} KB.',
   tagOnly: 'only',
   tagExclude: 'except',
   moveUp: 'Move up',
@@ -340,6 +378,8 @@ const CSS = `
 .cm-presets{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:8px}
 .cm-preset{border:1px solid var(--dsw-alias-border-l2);border-radius:10px;padding:10px 12px;background:var(--dsw-alias-bg-base);display:flex;flex-direction:column;gap:4px}
 .cm-preset.active{border-color:var(--dsw-alias-state-business-primary)}
+.cm-warn{color:var(--dsw-alias-state-warn-primary)}
+.cm-btn.ghost.danger{color:var(--dsw-alias-state-error-primary)}
 .cm-add{border:1px dashed var(--dsw-alias-border-l3);border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:6px}
 .cm-bar{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:10px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2)}
 .cm-msg{font-size:12.5px;color:var(--dsw-alias-label-secondary)}
@@ -490,18 +530,131 @@ function stepsShape(steps) {
   return JSON.stringify(steps.map(step => [step.method, step.enabled !== false, step.options ?? {}]));
 }
 
-function PresetBar({ presets, pipeline, lang, t, disabled, onApply }) {
+function downloadJson(data, filename) {
+  const blob = new Blob([`${JSON.stringify(data, null, 2)}\n`], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function fileSafe(name) {
+  return String(name).replace(/[\\/:*?"<>|\s]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'preset';
+}
+
+const MAX_IMPORT_BYTES = 200 * 1024;
+
+function PresetCard({ preset, active, lang, t, disabled, onApply, onExport, onRemove }) {
+  const [confirming, setConfirming] = React.useState(false);
+  React.useEffect(() => {
+    if (!confirming) return undefined;
+    const timer = setTimeout(() => setConfirming(false), 4000);
+    return () => clearTimeout(timer);
+  }, [confirming]);
+  return h('div', { className: `cm-preset${active ? ' active' : ''}` },
+    h('div', { className: 'cm-row' },
+      h('span', { className: 'cm-name cm-grow' }, preset.name?.[lang] ?? preset.id),
+      preset.user ? h('span', { className: 'cm-badge' }, t('presetUser')) : null,
+      active ? h('span', { className: 'cm-badge brand' }, t('presetActive')) : h('button', { type: 'button', className: 'cm-btn', disabled, onClick: () => onApply(preset) }, t('applyPreset'))),
+    preset.summary?.[lang] ? h('div', { className: 'cm-sum' }, preset.summary[lang]) : null,
+    h('div', { className: 'cm-row' },
+      h('span', { className: 'cm-sum cm-muted cm-grow' }, fmt(t('presetSteps'), { count: preset.steps.length })),
+      preset.user ? h('button', { type: 'button', className: 'cm-btn ghost', onClick: () => onExport([preset.id], preset.name?.[lang]) }, t('exportPreset')) : null,
+      preset.user ? h('button', {
+        type: 'button', className: `cm-btn ghost${confirming ? ' danger' : ''}`, disabled,
+        onClick: () => { if (confirming) { setConfirming(false); onRemove(preset.id); } else setConfirming(true); },
+      }, confirming ? t('removeConfirm') : t('removePreset')) : null),
+    (preset.warnings ?? []).length > 0 ? h('div', { className: 'cm-sum cm-warn' }, preset.warnings.join('; ')) : null);
+}
+
+function SavePresetForm({ pipeline, userNames, t, onSave, onCancel }) {
+  const [name, setName] = React.useState('');
+  const [summary, setSummary] = React.useState('');
+  const [busy, setBusy] = React.useState(false);
+  const trimmed = name.trim();
+  const overwrite = userNames.includes(trimmed);
+  const submit = async event => {
+    event.preventDefault();
+    if (!trimmed || busy) return;
+    setBusy(true);
+    try { await onSave(trimmed, summary.trim()); } finally { setBusy(false); }
+  };
+  return h('form', { className: 'cm-add', onSubmit: submit },
+    h('div', { className: 'cm-fields' },
+      h('label', { className: 'cm-field' },
+        h('span', null, t('presetName')),
+        h('input', { className: 'cm-input', value: name, maxLength: 60, autoFocus: true, onChange: e => setName(e.target.value) }),
+        overwrite ? h('small', { className: 'cm-warn' }, t('presetOverwrite')) : null),
+      h('label', { className: 'cm-field', style: { gridColumn: 'span 2' } },
+        h('span', null, t('presetSummary')),
+        h('input', { className: 'cm-input', value: summary, maxLength: 400, onChange: e => setSummary(e.target.value) }))),
+    h('div', { className: 'cm-row' },
+      h('span', { className: 'cm-sum cm-grow' }, fmt(t('presetSaveHint'), { count: pipeline.length })),
+      h('button', { type: 'button', className: 'cm-btn', onClick: onCancel }, t('cancel')),
+      h('button', { type: 'submit', className: 'cm-btn primary', disabled: busy || !trimmed || pipeline.length === 0 }, busy ? t('saving') : t('savePreset'))));
+}
+
+function PresetBar({ presets, pipeline, lang, t, disabled, userWritable, onApply, onWriteUserPresets }) {
   const current = stepsShape(pipeline);
-  return h('div', { className: 'cm-presets' },
-    presets.map(preset => {
-      const active = stepsShape(preset.steps) === current;
-      return h('div', { key: preset.id, className: `cm-preset${active ? ' active' : ''}` },
-        h('div', { className: 'cm-row' },
-          h('span', { className: 'cm-name cm-grow' }, preset.name?.[lang] ?? preset.id),
-          active ? h('span', { className: 'cm-badge brand' }, t('presetActive')) : h('button', { type: 'button', className: 'cm-btn', disabled, onClick: () => onApply(preset) }, t('applyPreset'))),
-        h('div', { className: 'cm-sum' }, preset.summary?.[lang]),
-        h('div', { className: 'cm-sum cm-muted' }, fmt(t('presetSteps'), { count: preset.steps.length })));
-    }));
+  const [saving, setSaving] = React.useState(false);
+  const [message, setMessage] = React.useState(undefined);
+  const fileInput = React.useRef(null);
+  const user = presets.filter(preset => preset.user);
+  const report = (ok, text, details) => setMessage({ ok, text, details });
+
+  const exportPresets = async (ids, name) => {
+    try {
+      const data = await callHost('presets/export', ids ? { ids } : {});
+      downloadJson(data, ids && ids.length === 1 ? `compaction-preset-${fileSafe(name)}.json` : 'compaction-presets.json');
+    } catch (error) { report(false, t('presetFailed') + String(error?.message ?? error)); }
+  };
+  const remove = async id => {
+    try {
+      await onWriteUserPresets(user.filter(preset => preset.id !== id).map(preset => ({ id: preset.id, name: preset.name.zh, summary: preset.summary.zh, steps: preset.steps })));
+      report(true, t('presetRemoved'));
+    } catch (error) { report(false, t('presetFailed') + String(error?.message ?? error)); }
+  };
+  const save = async (name, summary) => {
+    try {
+      const result = await callHost('presets/save', { name, summary, steps: pipeline });
+      await onWriteUserPresets(result.userPresets);
+      setSaving(false);
+      report(true, fmt(t(result.replaced ? 'presetReplaced' : 'presetSaved'), { name }), result.warnings);
+    } catch (error) { report(false, t('presetFailed') + String(error?.message ?? error)); }
+  };
+  const importFile = async event => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    try {
+      if (file.size > MAX_IMPORT_BYTES) throw new Error(fmt(t('importTooLarge'), { size: Math.round(MAX_IMPORT_BYTES / 1024) }));
+      const result = await callHost('presets/import', { text: await file.text() });
+      if (result.added.length > 0) await onWriteUserPresets(result.userPresets);
+      const warnings = result.added.flatMap(item => (item.warnings ?? []).map(warning => `${item.name}: ${warning}`));
+      report(result.added.length > 0, fmt(t('importDone'), { count: result.added.length, failed: result.errors.length }), [...result.errors, ...warnings]);
+    } catch (error) { report(false, t('presetFailed') + String(error?.message ?? error)); }
+  };
+
+  return h('div', { className: 'cm-steps' },
+    h('div', { className: 'cm-row' },
+      h('span', { className: 'cm-label cm-grow' }, t('presets')),
+      h('button', { type: 'button', className: 'cm-btn', disabled: !userWritable || pipeline.length === 0, onClick: () => { setMessage(undefined); setSaving(!saving); } }, t('saveAsPreset')),
+      h('button', { type: 'button', className: 'cm-btn', disabled: !userWritable, onClick: () => fileInput.current?.click() }, t('importPresets')),
+      h('button', { type: 'button', className: 'cm-btn', disabled: user.length === 0, onClick: () => exportPresets(undefined) }, t('exportAll')),
+      h('input', { ref: fileInput, type: 'file', accept: 'application/json,.json', style: { display: 'none' }, onChange: importFile })),
+    saving ? h(SavePresetForm, { pipeline, userNames: user.map(preset => preset.name.zh), t, onSave: save, onCancel: () => setSaving(false) }) : null,
+    message ? h('div', { className: `cm-msg ${message.ok ? 'ok' : 'err'}` },
+      message.text,
+      (message.details ?? []).length > 0 ? h('ul', { className: 'cm-sum', style: { margin: '4px 0 0', paddingLeft: 18 } }, message.details.map((line, i) => h('li', { key: i }, line))) : null) : null,
+    h('div', { className: 'cm-presets' },
+      presets.map(preset => h(PresetCard, {
+        key: `${preset.user ? 'u' : 'b'}:${preset.id}`, preset, active: stepsShape(preset.steps) === current, lang, t, disabled,
+        onApply, onExport: exportPresets, onRemove: remove,
+      }))));
 }
 
 function AddStep({ methods, lang, t, disabled, onAdd }) {
@@ -515,7 +668,7 @@ function AddStep({ methods, lang, t, disabled, onAdd }) {
     method ? h('div', { className: 'cm-sum' }, method.summary?.[lang]) : null);
 }
 
-function PipelineEditor({ pipeline, methods, presets, lang, t, disabled, onChange }) {
+function PipelineEditor({ pipeline, methods, presets, lang, t, disabled, onChange, onWriteUserPresets }) {
   const byId = new Map(methods.map(method => [method.id, method]));
   const update = (index, patch) => onChange(pipeline.map((step, i) => (i === index ? { ...step, ...patch } : step)));
   const move = (index, delta) => {
@@ -525,8 +678,7 @@ function PipelineEditor({ pipeline, methods, presets, lang, t, disabled, onChang
     onChange(next);
   };
   return h('div', { className: 'cm-steps' },
-    h('div', { className: 'cm-label' }, t('presets')),
-    h(PresetBar, { presets, pipeline, lang, t, disabled, onApply: preset => onChange(clone(preset.steps)) }),
+    h(PresetBar, { presets, pipeline, lang, t, disabled, userWritable: !disabled, onApply: preset => onChange(clone(preset.steps)), onWriteUserPresets }),
     h('div', { className: 'cm-label' }, t('steps')),
     pipeline.length === 0 ? h('p', { className: 'cm-hint' }, t('noSteps')) : null,
     pipeline.map((step, index) => h(StepCard, {
@@ -805,6 +957,14 @@ function CompactionPage({ ctx, form }) {
     }
   };
 
+  // Preset library changes are written at once, independent of the step draft.
+  const writeUserPresets = async list => {
+    const op = list.length === 0 ? { op: 'unset', path: ['userPresets'] } : { op: 'set', path: ['userPresets'], value: list };
+    const ok = await form.mutate([op], form.getSnapshot().revision);
+    if (!ok) throw new Error(t('notServed'));
+    await new Promise(resolve => setTimeout(resolve, 300));
+    setState(await callHost('state'));
+  };
   const effectiveBasic = state.basicConfigs?.[0];
   return h('div', { className: 'cm-page' },
     h('style', null, CSS),
@@ -822,6 +982,7 @@ function CompactionPage({ ctx, form }) {
         h(PipelineEditor, {
           pipeline: current.pipeline, methods: state.methods, presets: state.presets ?? [], lang, t, disabled: !writable,
           onChange: pipeline => edit({ pipeline }),
+          onWriteUserPresets: writeUserPresets,
         })),
       h('section', { className: 'cm-section' },
         h('h2', null, t('sectionBasic')),

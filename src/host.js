@@ -6,6 +6,7 @@ import { DEFAULT_PIPELINE, MethodRegistry, normalizePipeline } from './registry.
 import { installIntegration, cleanBasicOverrides } from './integration.js';
 import { enabledSteps, estimatorOf, fallbackEstimate, isDefaultPipeline, previewSession, recallActive, runPipeline } from './pipeline.js';
 import { liveAccessor, recoverOriginal, snapshotAccessor, surfaceEntries } from './session-view.js';
+import { cleanPreset, exportFile, mergeImported, parsePresetFile, savePreset, storedUserPresets, toStored } from './user-presets.js';
 
 export const name = 'compaction-manager';
 export const inject = ['sessions', 'tools', 'connection'];
@@ -34,9 +35,15 @@ export const Config = z.object({
   }).volatile().description('Overrides of compaction-basic. Empty means the official values.'),
   recall: z.union(['auto', 'always', 'never']).default('auto').volatile()
     .description('When restore_context is offered: auto = only while an enabled step leaves recall ids.'),
+  userPresets: z.array(z.object({
+    id: z.string(),
+    name: z.string(),
+    summary: z.string(),
+    steps: z.array(stepSchema),
+  })).default([]).volatile().description('Presets saved or imported in the panel.'),
 });
 
-const MAX_BODY = 64 * 1024;
+const MAX_BODY = 256 * 1024;
 
 function json(value, status = 200) {
   return new Response(JSON.stringify(value), {
@@ -93,8 +100,21 @@ export function apply(ctx, config) {
     register: method => registry.register(method),
     registerPreset: preset => registry.registerPreset(preset),
     list: () => registry.describe(),
-    presets: () => registry.describePresets(),
+    presets: () => allPresets(),
   });
+
+  const userPresets = () => storedUserPresets(read('userPresets', []), registry);
+  function allPresets() {
+    const user = userPresets().map(preset => ({
+      id: preset.id,
+      user: true,
+      name: { zh: preset.name, en: preset.name },
+      summary: { zh: preset.summary, en: preset.summary },
+      steps: preset.steps,
+      warnings: preset.warnings,
+    }));
+    return [...registry.describePresets(), ...user];
+  }
 
   const integration = installIntegration(official, {
     logger,
@@ -173,7 +193,7 @@ export function apply(ctx, config) {
     methods: registry.describe(),
     pipeline: normalizePipeline(read('pipeline', DEFAULT_PIPELINE)),
     defaultPipeline: normalizePipeline(DEFAULT_PIPELINE),
-    presets: registry.describePresets(),
+    presets: allPresets(),
     basic: read('basic', {}),
     recall: read('recall', 'auto'),
     recallActive: recallActive(read('pipeline', DEFAULT_PIPELINE), registry, read('recall', 'auto')),
@@ -189,6 +209,34 @@ export function apply(ctx, config) {
   route('validate', async input => {
     cleanBasicOverrides(input.basic ?? {});
     return true;
+  });
+
+  // Preset routes validate and merge; the panel writes the returned list
+  // through its settings form, so saving follows the normal settings path.
+  route('presets/save', async input => {
+    const preset = cleanPreset({ name: input.name, summary: input.summary, steps: input.steps }, registry);
+    const result = savePreset(userPresets(), preset);
+    return { userPresets: toStored(result.userPresets), id: result.preset.id, replaced: result.replaced, warnings: preset.warnings };
+  });
+
+  route('presets/import', async input => {
+    if (typeof input.text !== 'string') throw new Error('text is required');
+    let data;
+    try { data = JSON.parse(input.text); } catch (error) { throw new Error(`the file is not valid JSON: ${error.message}`); }
+    const { presets, errors } = parsePresetFile(data, registry);
+    const merged = mergeImported(userPresets(), presets);
+    return {
+      userPresets: toStored(merged.userPresets),
+      added: merged.added.map(preset => ({ id: preset.id, name: preset.name, warnings: preset.warnings })),
+      errors,
+    };
+  });
+
+  route('presets/export', async input => {
+    const ids = Array.isArray(input.ids) ? new Set(input.ids.map(String)) : undefined;
+    const selected = userPresets().filter(preset => ids === undefined || ids.has(preset.id));
+    if (selected.length === 0) throw new Error('no preset to export');
+    return exportFile(selected);
   });
 
   route('sessions', async (_input, signal) => {

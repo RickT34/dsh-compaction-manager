@@ -80,6 +80,14 @@ function CompactionPage({ ctx, form }) {
     }
   };
 
+  // Preset library changes are written at once, independent of the step draft.
+  const writeUserPresets = async list => {
+    const op = list.length === 0 ? { op: 'unset', path: ['userPresets'] } : { op: 'set', path: ['userPresets'], value: list };
+    const ok = await form.mutate([op], form.getSnapshot().revision);
+    if (!ok) throw new Error(t('notServed'));
+    await new Promise(resolve => setTimeout(resolve, 300));
+    setState(await callHost('state'));
+  };
   const effectiveBasic = state.basicConfigs?.[0];
   return h('div', { className: 'cm-page' },
     h('style', null, CSS),
@@ -97,6 +105,7 @@ function CompactionPage({ ctx, form }) {
         h(PipelineEditor, {
           pipeline: current.pipeline, methods: state.methods, presets: state.presets ?? [], lang, t, disabled: !writable,
           onChange: pipeline => edit({ pipeline }),
+          onWriteUserPresets: writeUserPresets,
         })),
       h('section', { className: 'cm-section' },
         h('h2', null, t('sectionBasic')),
