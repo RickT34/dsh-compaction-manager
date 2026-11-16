@@ -43,7 +43,9 @@ test('host apply wires routes, tool, and the default passthrough', async () => {
   assert.equal(state.value.integration.pruner, true);
   assert.equal(state.value.integration.basic, true);
   assert.equal(state.value.recallActive, false);
-  assert.deepEqual(state.value.methods.map(m => m.id), ['official-pruner', 'magic-compact', 'opencode-dcp', 'fold-tool-calls']);
+  assert.deepEqual(state.value.methods.map(m => m.id), ['trim-head-tail', 'omit-output', 'dedupe', 'drop-superseded-reads', 'purge-errors', 'fold-calls']);
+  assert.deepEqual(state.value.pipeline, [{ id: 'trim', method: 'trim-head-tail', enabled: true, options: {} }]);
+  assert.equal(state.value.presets.length, 4);
   const tool = ctx.toolDefs[0];
   assert.equal(tool.def.name, 'restore_context');
   assert.equal(await tool.opts.when(), false);
@@ -75,7 +77,7 @@ test('configured pipeline runs inside the pruner hook; preview and restore work'
     assert.equal(await tool.opts.when(), true);
     bareP().pruneSession(session);
     const notice = session.deriveMessages().find(m => m.role === 'tool' && m.content[0].text.startsWith('[compacted'));
-    assert.ok(notice, 'magic-compact notice written');
+    assert.ok(notice, 'omission notice written (legacy magic-compact config migrated)');
     const id = /id=(r\d+)/.exec(notice.content[0].text)[1];
     const out = await tool.def.execute({ id, max_chars: 100 }, { agent: { session } });
     assert.equal(out.truncated, true);

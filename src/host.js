@@ -1,24 +1,25 @@
 // dsh-compaction-manager host half: unified compaction configuration, an
 // extensible method registry, the restore_context tool, and preview routes.
 import z from '@deepseek-ai/schemastery';
-import { DEFAULT_PIPELINE, RECALL_TOOL, buildView } from './core.js';
-import { MethodRegistry, normalizePipeline } from './registry.js';
+import { RECALL_TOOL, buildView } from './core.js';
+import { DEFAULT_PIPELINE, MethodRegistry, normalizePipeline } from './registry.js';
 import { installIntegration, cleanBasicOverrides } from './integration.js';
-import { enabledSteps, estimatorOf, fallbackEstimate, previewSession, recallActive, runPipeline } from './pipeline.js';
+import { enabledSteps, estimatorOf, fallbackEstimate, isDefaultPipeline, previewSession, recallActive, runPipeline } from './pipeline.js';
 import { liveAccessor, recoverOriginal, snapshotAccessor, surfaceEntries } from './session-view.js';
 
 export const name = 'compaction-manager';
 export const inject = ['sessions', 'tools', 'connection'];
 
 const stepSchema = z.object({
+  id: z.string(),
   method: z.string(),
-  enabled: z.boolean().default(false),
+  enabled: z.boolean().default(true),
   options: z.dict(z.any()).default({}),
 });
 
 export const Config = z.object({
   pipeline: z.array(stepSchema).default(DEFAULT_PIPELINE).volatile()
-    .description('Ordered model-free compaction steps run when compaction triggers. The default runs only the official pruner.'),
+    .description('Ordered model-free compaction steps run when compaction triggers. A method may appear several times. The default runs only the official head/tail trim.'),
   basic: z.object({
     thresholdRatio: z.number(),
     retainRatio: z.number(),
@@ -88,9 +89,11 @@ export function apply(ctx, config) {
 
   // Extension point for other plugins: ctx.compactionMethods.register(method).
   ctx.provide('compactionMethods', {
-    // Callers own the returned disposer: ctx.effect(() => ctx.compactionMethods.register(method)).
+    // Callers own the returned disposers: ctx.effect(() => ctx.compactionMethods.register(method)).
     register: method => registry.register(method),
+    registerPreset: preset => registry.registerPreset(preset),
     list: () => registry.describe(),
+    presets: () => registry.describePresets(),
   });
 
   const integration = installIntegration(official, {
@@ -98,20 +101,21 @@ export function apply(ctx, config) {
     stats,
     basicOverrides: () => read('basic', {}),
     runPipeline(pruner, session, original) {
-      const steps = enabledSteps(read('pipeline', DEFAULT_PIPELINE), registry);
+      const pipeline = read('pipeline', DEFAULT_PIPELINE);
+      const steps = enabledSteps(pipeline, registry);
       const runOfficial = target => original.call(pruner, target);
       const meter = pruner.ctx?.tokenMeter ?? ctx.get('tokenMeter');
       const prunerConfig = pruner.config;
       if (prunerConfig) stats.prunerConfigs.set(`${prunerConfig.thresholdChars}/${prunerConfig.headChars}/${prunerConfig.tailChars}`, prunerConfig);
       // Exactly the default pipeline: behave as if this plugin were absent.
-      if (steps.length === 1 && steps[0].method === 'official-pruner' && Object.keys(steps[0].options ?? {}).length === 0) {
+      if (isDefaultPipeline(pipeline)) {
         return runOfficial(session);
       }
       if (steps.length === 0) return { pruned: [], charsRemoved: 0 };
-      const report = runPipeline({ session, meter, registry, pipeline: read('pipeline', DEFAULT_PIPELINE), prunerConfig, runOfficial, logger });
+      const report = runPipeline({ session, meter, registry, pipeline, prunerConfig, runOfficial, logger });
       stats.runs.unshift({ at: Date.now(), sessionId: session.id, steps: report.steps, tokensSaved: report.tokensSaved });
       stats.runs.length = Math.min(stats.runs.length, 20);
-      logger.info?.(`compaction-manager: pipeline on ${session.id}: ${report.steps.map(step => `${step.method}=${step.applied}`).join(', ')}, ~${report.tokensSaved} tokens`);
+      logger.info?.(`compaction-manager: pipeline on ${session.id}: ${report.steps.map(step => `${step.id}=${step.applied}`).join(', ')}, ~${report.tokensSaved} tokens`);
       return { pruned: report.pruned, charsRemoved: report.charsRemoved };
     },
   });
@@ -167,8 +171,9 @@ export function apply(ctx, config) {
 
   route('state', async () => ({
     methods: registry.describe(),
-    pipeline: normalizePipeline(read('pipeline', DEFAULT_PIPELINE), registry, DEFAULT_PIPELINE),
-    defaultPipeline: DEFAULT_PIPELINE,
+    pipeline: normalizePipeline(read('pipeline', DEFAULT_PIPELINE)),
+    defaultPipeline: normalizePipeline(DEFAULT_PIPELINE),
+    presets: registry.describePresets(),
     basic: read('basic', {}),
     recall: read('recall', 'auto'),
     recallActive: recallActive(read('pipeline', DEFAULT_PIPELINE), registry, read('recall', 'auto')),

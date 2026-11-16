@@ -52,8 +52,7 @@ function CompactionPage({ ctx, form }) {
   if (state === undefined) return h('div', { className: 'cm-page' }, h('div', { className: 'cm-inner cm-muted' }, t('loading')));
 
   const saved = { pipeline: state.pipeline, basic: state.basic ?? {}, recall: state.recall ?? 'auto' };
-  const defaultFull = state.defaultPipeline.map(step => ({ method: step.method, enabled: step.enabled, options: {} }))
-    .concat(state.methods.filter(m => !state.defaultPipeline.some(s => s.method === m.id)).map(m => ({ method: m.id, enabled: false, options: {} })));
+
   const current = draft ?? saved;
   const dirty = draft !== undefined && !sameJson(draft, saved);
   const writable = snap.status === 'ready' && snap.writable;
@@ -65,7 +64,7 @@ function CompactionPage({ ctx, form }) {
     try {
       await callHost('validate', { basic: current.basic });
       const ops = [];
-      const isDefaultPipeline = sameJson(current.pipeline, defaultFull);
+      const isDefaultPipeline = sameJson(current.pipeline, state.defaultPipeline);
       ops.push(isDefaultPipeline ? { op: 'unset', path: ['pipeline'] } : { op: 'set', path: ['pipeline'], value: current.pipeline });
       ops.push(Object.keys(current.basic).length === 0 ? { op: 'unset', path: ['basic'] } : { op: 'set', path: ['basic'], value: current.basic });
       ops.push(current.recall === 'auto' ? { op: 'unset', path: ['recall'] } : { op: 'set', path: ['recall'], value: current.recall });
@@ -96,9 +95,8 @@ function CompactionPage({ ctx, form }) {
         h('h2', null, t('sectionPipeline')),
         h('p', { className: 'cm-hint' }, t('pipelineHint')),
         h(PipelineEditor, {
-          pipeline: current.pipeline, methods: state.methods, lang, t, disabled: !writable,
+          pipeline: current.pipeline, methods: state.methods, presets: state.presets ?? [], lang, t, disabled: !writable,
           onChange: pipeline => edit({ pipeline }),
-          onReset: () => edit({ pipeline: clone(defaultFull) }),
         })),
       h('section', { className: 'cm-section' },
         h('h2', null, t('sectionBasic')),
@@ -117,7 +115,7 @@ function CompactionPage({ ctx, form }) {
           state.stats.runs.map((run, index) => h('div', { key: index, className: 'cm-item' },
             h('span', { className: 'cm-muted' }, new Date(run.at).toLocaleString()), ' · ',
             h('span', { className: 'cm-mono' }, run.sessionId), ' · ',
-            run.steps.map(step => `${step.method}: ${step.applied}`).join(', '),
+            run.steps.map(step => `${step.id ?? step.method}: ${step.applied}`).join(', '),
             ` · −${compact(run.tokensSaved)} tokens`))))));
 }
 

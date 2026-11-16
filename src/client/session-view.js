@@ -87,5 +87,5 @@ function SessionCompactionView({ ctx, sessionId }) {
           h('span', { className: 'cm-muted' }, fmt(t('surfaceInfo'), { nodes: result.nodes, tools: result.toolResults }))),
         h('div', { className: 'cm-meter' }, h('div', { style: { width: `${result.beforeTokens > 0 ? Math.max(0, Math.min(100, (result.afterTokens / result.beforeTokens) * 100)) : 100}%` } })),
         changes === 0 ? h('p', { className: 'cm-hint' }, t('viewNothing')) : null,
-        result.steps.filter(step => step.enabled).map(step => h(PreviewStep, { key: step.method, step, methods: state.methods, lang, t }))) : (busy ? h('p', { className: 'cm-muted' }, t('previewing')) : null)));
+        result.steps.filter(step => step.enabled).map(step => h(PreviewStep, { key: step.id ?? step.method, step, methods: state.methods, lang, t }))) : (busy ? h('p', { className: 'cm-muted' }, t('previewing')) : null)));
 }

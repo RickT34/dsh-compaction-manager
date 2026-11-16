@@ -1,8 +1,11 @@
-// Pipeline execution against live sessions, shared by the pruner hook, the
-// optional early trigger, and previews.
-import { DEFAULT_PIPELINE, buildView, normalizeCandidates, resolveOptions, previewPipeline } from './core.js';
+// Pipeline execution against live sessions, shared by the pruner hook,
+// "compact now", and previews.
+import { buildView, normalizeCandidates, resolveOptions, previewPipeline } from './core.js';
 import { applyCandidate, liveAccessor, surfaceEntries } from './session-view.js';
 import { normalizePipeline } from './registry.js';
+
+const TRIM = 'trim-head-tail';
+const PRUNER_KEYS = ['thresholdChars', 'headChars', 'tailChars'];
 
 export function fallbackEstimate(message) {
   let chars = 0;
@@ -18,17 +21,30 @@ export function estimatorOf(meter) {
   return typeof meter?.estimateMessage === 'function' ? message => meter.estimateMessage(message) : fallbackEstimate;
 }
 
-/** Whether resolved official-pruner options behave exactly like the preset's own pruner. */
+/** Whether resolved head/tail options behave exactly like the preset's own pruner. */
 export function isPlainOfficial(options, prunerConfig) {
   if (prunerConfig === undefined || options.recallHint === true) return false;
-  return options.thresholdChars === prunerConfig.thresholdChars
-    && options.headChars === prunerConfig.headChars
-    && options.tailChars === prunerConfig.tailChars;
+  if (options.tools?.length > 0 || options.excludeTools?.length > 0) return false;
+  return PRUNER_KEYS.every(key => options[key] === prunerConfig[key]);
+}
+
+/** Whether a stored pipeline is exactly the untouched default (official trim alone). */
+export function isDefaultPipeline(rawPipeline) {
+  const steps = normalizePipeline(rawPipeline).filter(step => step.enabled);
+  return steps.length === 1 && steps[0].method === TRIM && Object.keys(steps[0].options).length === 0;
+}
+
+/** Head/tail options fall back to the agent preset's own pruner configuration. */
+function withPrunerDefaults(step, prunerConfig) {
+  if (step.method !== TRIM || prunerConfig === undefined) return step;
+  const base = {};
+  for (const key of PRUNER_KEYS) if (prunerConfig[key] !== undefined) base[key] = prunerConfig[key];
+  return { ...step, options: { ...base, ...step.options } };
 }
 
 /** Pipeline steps that will actually run, in order. */
 export function enabledSteps(rawPipeline, registry) {
-  return normalizePipeline(rawPipeline, registry, DEFAULT_PIPELINE).filter(step => step.enabled && registry.get(step.method) !== undefined);
+  return normalizePipeline(rawPipeline).filter(step => step.enabled && registry.get(step.method) !== undefined);
 }
 
 /** Whether any enabled step produces recall ids. */
@@ -45,17 +61,11 @@ export function recallActive(rawPipeline, registry, mode) {
   return false;
 }
 
-function stepOptions(step, method, prunerConfig) {
-  if (method.id === 'official-pruner' && prunerConfig !== undefined) {
-    return resolveOptions(method, { ...prunerConfig, ...step.options });
-  }
-  return resolveOptions(method, step.options);
-}
 
 /**
  * Run the pipeline on a live session.
  * @param context - { session, meter, registry, pipeline, prunerConfig?, runOfficial?(session), logger }
- * @returns { pruned: [], charsRemoved, tokensSaved, steps: [{ method, applied, tokensSaved, error? }] }
+ * @returns { pruned: [], charsRemoved, tokensSaved, steps: [{ id, method, applied, tokensSaved, error? }] }
  */
 export function runPipeline(context) {
   const { session, meter, registry, logger } = context;
@@ -64,17 +74,17 @@ export function runPipeline(context) {
   for (const step of steps) {
     const method = registry.get(step.method);
     let options;
-    try { options = stepOptions(step, method, context.prunerConfig); } catch (error) {
-      logger?.warn?.(`compaction-manager: skipping ${method.id}: ${error.message}`);
-      report.steps.push({ method: method.id, applied: 0, tokensSaved: 0, error: error.message });
+    try { options = resolveOptions(method, withPrunerDefaults(step, context.prunerConfig).options); } catch (error) {
+      logger?.warn?.(`compaction-manager: skipping ${step.id}: ${error.message}`);
+      report.steps.push({ id: step.id, method: method.id, applied: 0, tokensSaved: 0, error: error.message });
       continue;
     }
-    if (method.id === 'official-pruner' && typeof context.runOfficial === 'function' && isPlainOfficial(options, context.prunerConfig)) {
+    if (method.id === TRIM && typeof context.runOfficial === 'function' && isPlainOfficial(options, context.prunerConfig)) {
       // Untouched official settings: delegate to the original implementation.
       const result = context.runOfficial(session);
       report.pruned.push(...(result?.pruned ?? []));
       report.charsRemoved += result?.charsRemoved ?? 0;
-      report.steps.push({ method: method.id, applied: result?.pruned?.length ?? 0, tokensSaved: 0, official: true });
+      report.steps.push({ id: step.id, method: method.id, applied: result?.pruned?.length ?? 0, tokensSaved: 0, official: true });
       continue;
     }
     let applied = 0;
@@ -88,12 +98,12 @@ export function runPipeline(context) {
       }
     } catch (error) {
       // A rejected append fails the remainder of this step; earlier replacements stay durable.
-      logger?.warn?.(`compaction-manager: ${method.id} stopped: ${error.message}`);
-      report.steps.push({ method: method.id, applied, tokensSaved: saved, error: error.message });
+      logger?.warn?.(`compaction-manager: ${step.id} stopped: ${error.message}`);
+      report.steps.push({ id: step.id, method: method.id, applied, tokensSaved: saved, error: error.message });
       report.tokensSaved += saved;
       continue;
     }
-    report.steps.push({ method: method.id, applied, tokensSaved: saved });
+    report.steps.push({ id: step.id, method: method.id, applied, tokensSaved: saved });
     report.tokensSaved += saved;
   }
   return report;
@@ -101,10 +111,6 @@ export function runPipeline(context) {
 
 /** Preview the pipeline over detached entries; nothing is written. */
 export function previewSession(entries, rawPipeline, registry, estimate, prunerConfig) {
-  const steps = normalizePipeline(rawPipeline, registry, DEFAULT_PIPELINE).map(step => {
-    const method = registry.get(step.method);
-    if (method?.id === 'official-pruner' && prunerConfig !== undefined) return { ...step, options: { ...prunerConfig, ...step.options } };
-    return step;
-  });
+  const steps = normalizePipeline(rawPipeline).map(step => withPrunerDefaults(step, prunerConfig));
   return previewPipeline(entries, steps, registry.methods, estimate);
 }

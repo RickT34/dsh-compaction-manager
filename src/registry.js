@@ -1,8 +1,11 @@
-// Method registry: built-in methods plus methods contributed by other plugins
+// Method and preset registry: built-ins plus contributions from other plugins
 // through the `compactionMethods` service.
-import { BUILTIN_METHODS, resolveOptions } from './core.js';
+import { resolveOptions } from './core.js';
+import { BUILTIN_METHODS } from './methods.js';
+import { BUILTIN_PRESETS, DEFAULT_PIPELINE, migrateLegacyStep } from './presets.js';
 
 const ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+const OPTION_TYPES = ['number', 'boolean', 'string', 'list', 'select'];
 
 function localized(value, fallback = '') {
   if (typeof value === 'string') return { zh: value, en: value };
@@ -20,22 +23,31 @@ function validateMethod(method) {
   if (typeof method.plan !== 'function') throw new TypeError(`compaction method "${method.id}" must define plan(view, options)`);
   if (method.options !== undefined && !Array.isArray(method.options)) throw new TypeError(`compaction method "${method.id}" options must be an array`);
   for (const option of method.options ?? []) {
-    if (typeof option?.key !== 'string' || !['number', 'boolean', 'string', 'list', 'select'].includes(option.type)) {
-      throw new TypeError(`compaction method "${method.id}" has an invalid option declaration`);
-    }
+    if (typeof option?.key !== 'string' || !OPTION_TYPES.includes(option.type)) throw new TypeError(`compaction method "${method.id}" has an invalid option declaration`);
+  }
+}
+
+function validatePreset(preset) {
+  if (!preset || typeof preset !== 'object') throw new TypeError('compaction preset must be an object');
+  if (typeof preset.id !== 'string' || !ID.test(preset.id)) throw new TypeError(`compaction preset id "${preset?.id}" must match ${ID}`);
+  if (!Array.isArray(preset.steps) || preset.steps.length === 0) throw new TypeError(`compaction preset "${preset.id}" needs at least one step`);
+  for (const item of preset.steps) {
+    if (typeof item?.method !== 'string') throw new TypeError(`compaction preset "${preset.id}" has a step without a method`);
   }
 }
 
 export class MethodRegistry {
   constructor() {
     this.methods = new Map();
+    this.presets = new Map();
     this.listeners = new Set();
     for (const method of BUILTIN_METHODS) this.methods.set(method.id, method);
+    for (const preset of BUILTIN_PRESETS) this.presets.set(preset.id, preset);
   }
 
   /**
-   * Register an extension method. The returned disposer removes it.
-   * A method is `{ id, name, summary, details, options, recall(options), plan(view, options) }`;
+   * Register an extension method; the returned disposer removes it.
+   * A method is `{ id, name, summary, details, options, tagKeys?, recall(options), plan(view, options) }`.
    * `plan` returns candidates `{ type: 'result', seq, content }` or
    * `{ type: 'fold', startSeq, endSeq, content }` and must not mutate anything.
    */
@@ -45,20 +57,23 @@ export class MethodRegistry {
     this.methods.set(method.id, method);
     this.emit();
     return () => {
-      if (this.methods.get(method.id) === method) {
-        this.methods.delete(method.id);
-        this.emit();
-      }
+      if (this.methods.get(method.id) === method) { this.methods.delete(method.id); this.emit(); }
     };
   }
 
-  get(id) {
-    return this.methods.get(id);
+  /** Register a preset `{ id, name, summary, steps: [{ method, enabled?, options? }] }`; returns its disposer. */
+  registerPreset(preset) {
+    validatePreset(preset);
+    if (this.presets.has(preset.id)) throw new Error(`compaction preset "${preset.id}" is already registered`);
+    this.presets.set(preset.id, preset);
+    this.emit();
+    return () => {
+      if (this.presets.get(preset.id) === preset) { this.presets.delete(preset.id); this.emit(); }
+    };
   }
 
-  list() {
-    return [...this.methods.values()];
-  }
+  get(id) { return this.methods.get(id); }
+  list() { return [...this.methods.values()]; }
 
   onChange(listener) {
     this.listeners.add(listener);
@@ -71,7 +86,7 @@ export class MethodRegistry {
     }
   }
 
-  /** JSON-safe description for the panel. */
+  /** JSON-safe method descriptions for the panel. */
   describe() {
     return this.list().map(method => {
       let defaults = {};
@@ -91,12 +106,24 @@ export class MethodRegistry {
           default: option.default,
           min: option.min,
           max: option.max,
-          choices: option.choices,
+          choices: option.choices?.map(choice => ({ value: choice.value, label: localized(choice.label, String(choice.value)) })),
         })),
+        tagKeys: Array.isArray(method.tagKeys) ? method.tagKeys.filter(key => typeof key === 'string') : [],
         defaults,
         recall: typeof method.recall === 'function' ? Boolean(safeRecall(method, defaults)) : false,
       };
     });
+  }
+
+  /** JSON-safe preset descriptions, with normalized steps. */
+  describePresets() {
+    return [...this.presets.values()].map(preset => ({
+      id: preset.id,
+      builtin: preset.builtin === true,
+      name: localized(preset.name, preset.id),
+      summary: localized(preset.summary),
+      steps: normalizePipeline(preset.steps),
+    }));
   }
 }
 
@@ -104,22 +131,38 @@ function safeRecall(method, options) {
   try { return method.recall(options); } catch { return false; }
 }
 
-/** Normalize a stored pipeline: known methods keep their order; missing built-ins are appended disabled. */
-export function normalizePipeline(raw, registry, fallback) {
-  const source = Array.isArray(raw) && raw.length > 0 ? raw : fallback;
-  const seen = new Set();
-  const out = [];
-  for (const step of source) {
-    if (!step || typeof step.method !== 'string' || seen.has(step.method)) continue;
-    seen.add(step.method);
-    out.push({
-      method: step.method,
-      enabled: step.enabled === true,
-      options: step.options && typeof step.options === 'object' && !Array.isArray(step.options) ? { ...step.options } : {},
-    });
-  }
-  for (const method of registry.list()) {
-    if (!seen.has(method.id)) out.push({ method: method.id, enabled: false, options: {} });
-  }
-  return out;
+function plainOptions(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? { ...value } : {};
 }
+
+/**
+ * Normalize a stored pipeline: expand 0.1.x legacy methods, keep step order,
+ * and give every step a unique instance id. Unknown methods are kept so a
+ * temporarily missing extension does not lose its configuration.
+ */
+export function normalizePipeline(raw, fallback = DEFAULT_PIPELINE) {
+  const source = Array.isArray(raw) ? raw : fallback;
+  const steps = [];
+  let legacy = false;
+  for (const item of source) {
+    if (!item || typeof item.method !== 'string') continue;
+    const migrated = migrateLegacyStep(item);
+    if (migrated !== undefined) { legacy = true; steps.push(...migrated); continue; }
+    steps.push({ id: typeof item.id === 'string' ? item.id : undefined, method: item.method, enabled: item.enabled !== false, options: plainOptions(item.options) });
+  }
+  // A legacy pipeline with nothing enabled was the untouched 0.1.x default.
+  if (legacy && steps.length === 0) return normalizePipeline(fallback, []);
+  const used = new Set();
+  return steps.map(item => {
+    let id = item.id && ID.test(item.id) ? item.id : item.method;
+    if (used.has(id)) {
+      let n = 2;
+      while (used.has(`${id}-${n}`)) n += 1;
+      id = `${id}-${n}`;
+    }
+    used.add(id);
+    return { ...item, id };
+  });
+}
+
+export { DEFAULT_PIPELINE };

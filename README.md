@@ -27,16 +27,31 @@ Or in the Web app: **Plugins → Add plugin**, enter `dsh-compaction-manager`. T
 
 To install the latest commit from GitHub instead of the npm release, use `github:RickT34/dsh-compaction-manager`.
 
-## Built-in methods
+## Methods and presets
 
-| Method | What it hides | Restorable | Default |
-|---|---|---|---|
-| Official head/tail trim | Middle of tool results over 8192 chars | Only with "Include recall id" | On |
-| Magic Compact | Old bulky tool outputs, replaced with an omission notice (after aerovato/magic-compact `/magic-trim`) | Yes | Off |
-| OpenCode DCP | Duplicate calls, errored call inputs after N turns, optionally superseded reads (after Opencode-DCP) | Yes | Off |
-| Fold old tool calls | Whole call groups, including arguments such as file bodies in `write`/`edit` | Yes | Off |
+Each method does one kind of change with one selection rule. A step is one method with its own options and tool scope (`tools` / `excludeTools`); the same method can appear in several steps.
 
-Folding replaces a closed assistant tool-call message and its results with one user message, because DSH does not allow rewriting tool-call arguments on their own.
+| Method | What it does | Restorable |
+|---|---|---|
+| Head/tail trim | Keeps the head and tail of results over 8192 chars; identical to the official pruner with default options | Only with "Include recall id" |
+| Omit output | Replaces older results over a character or word threshold with a one-line notice | Yes |
+| Deduplicate calls | Keeps only the newest result of calls with identical tool and arguments | Yes |
+| Drop superseded reads | Replaces a read made stale by a later write, edit, or full read of the same path | Yes |
+| Purge failed calls | Folds call groups that all failed some turns ago into tool name, description, and error | Yes |
+| Fold tool calls | Replaces an older call group (arguments and results) over a threshold with text; detail level is a summary or the description only | Yes |
+
+Every notice keeps the call's `description` argument in full.
+
+Presets are ready-made step lists. Applying one replaces the steps, which you can then edit.
+
+| Preset | Steps |
+|---|---|
+| Official default (default) | Head/tail trim. Behaves exactly like stock DSH. |
+| Magic Compact | Omit output three times (reloadable tools over 200 chars, subagent and job tools over 4096, others over 1024 chars or 128 words), then head/tail trim. After aerovato/magic-compact `/magic-trim`. |
+| OpenCode DCP | Deduplicate, drop superseded reads (off), purge failed calls after 4 turns, head/tail trim. After Opencode-DCP. |
+| Aggressive | Deduplicate, purge failed calls, fold calls over 4096 chars to descriptions only, fold calls with arguments over 1024 chars to a summary, head/tail trim. |
+
+Folding replaces a closed assistant tool-call message and its results with one user message, because DSH does not allow rewriting tool-call arguments on their own. Pipelines saved by 0.1.x are migrated to the equivalent steps when read.
 
 ## How it hooks in
 
@@ -49,7 +64,7 @@ Unloading the plugin restores the originals. Every replacement uses the same rep
 
 ## Extending
 
-Other plugins can add methods:
+Other plugins can add methods and presets:
 
 ```js
 export const inject = ['compactionMethods']
@@ -67,6 +82,12 @@ export function apply(ctx) {
         .filter(n => n.type === 'tool' && !n.pending && n.chars > options.minChars)
         .map(n => ({ type: 'result', seq: n.seq, content: [{ type: 'text', text: `[compacted · id=r${n.rootSeq}] …` }] }))
     },
+  }))
+  ctx.effect(() => ctx.compactionMethods.registerPreset({
+    id: 'my-preset',
+    name: { zh: '我的预设', en: 'My preset' },
+    summary: { zh: '…', en: '…' },
+    steps: [{ method: 'dedupe' }, { method: 'my-method', options: { minChars: 2000 } }],
   }))
 }
 ```

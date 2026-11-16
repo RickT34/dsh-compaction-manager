@@ -64,7 +64,8 @@ function PreviewItem({ item, t }) {
 function PreviewStep({ step, methods, lang, t }) {
   const [open, setOpen] = React.useState(step.items.length > 0 && step.items.length <= 6);
   const method = methods.find(m => m.id === step.method);
-  const name = method?.name?.[lang] ?? step.method;
+  const tag = stepTag(method, step.options ?? {}, lang, t);
+  const name = `${method?.name?.[lang] ?? step.method}${tag ? ` · ${tag}` : ''}`;
   let summary;
   if (!step.enabled) summary = t('stepDisabled');
   else if (step.error) summary = `${t('stepError')}${step.error}`;

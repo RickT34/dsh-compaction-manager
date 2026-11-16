@@ -80,6 +80,11 @@ const CSS = `
 .cm-switch[aria-checked=true]::after{left:16px}
 .cm-switch:disabled{opacity:.45;cursor:default}
 .cm-final{border-style:dashed}
+.cm-label{font-size:12px;font-weight:600;color:var(--dsw-alias-label-tertiary);text-transform:uppercase;letter-spacing:.04em;margin-top:6px}
+.cm-presets{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:8px}
+.cm-preset{border:1px solid var(--dsw-alias-border-l2);border-radius:10px;padding:10px 12px;background:var(--dsw-alias-bg-base);display:flex;flex-direction:column;gap:4px}
+.cm-preset.active{border-color:var(--dsw-alias-state-business-primary)}
+.cm-add{border:1px dashed var(--dsw-alias-border-l3);border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:6px}
 .cm-bar{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:10px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2)}
 .cm-msg{font-size:12.5px;color:var(--dsw-alias-label-secondary)}
 .cm-msg.err{color:var(--dsw-alias-state-error-primary)}

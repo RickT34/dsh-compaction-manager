@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { makeSession, bareP, meter, Session, SessionId, foldSurface, deriveEventMessage } from './helpers.mjs';
-import { buildView, magicCompact, opencodeDcp, foldToolCalls, officialPruner, resolveOptions, normalizeCandidates, DEFAULT_PIPELINE, RECALL_TOOL } from '../src/core.js';
+import { buildView, resolveOptions, normalizeCandidates, RECALL_TOOL } from '../src/core.js';
+import { trimHeadTail, omitOutput, foldCalls } from '../src/methods.js';
+import { BUILTIN_PRESETS, DEFAULT_PIPELINE } from '../src/presets.js';
 import { applyCandidate, liveAccessor, recoverOriginal, surfaceEntries, snapshotAccessor } from '../src/session-view.js';
-import { MethodRegistry } from '../src/registry.js';
+import { MethodRegistry, normalizePipeline } from '../src/registry.js';
 import { runPipeline, previewSession, recallActive } from '../src/pipeline.js';
 import { installIntegration } from '../src/integration.js';
 
@@ -18,15 +20,17 @@ function applyAll(session, candidates) {
   for (const c of candidates) saved += applyCandidate(session, meter, c);
   return saved;
 }
+const preset = id => BUILTIN_PRESETS.find(p => p.id === id).steps;
+const withOptions = (steps, extra) => steps.map(step => ({ ...step, options: { ...step.options, ...extra } }));
 const visible = s => JSON.stringify(s.deriveMessages().map(m => ({ role: m.role, content: m.content })));
 
-test('official-pruner method reproduces the official pruner byte for byte', () => {
+test('trim-head-tail reproduces the official pruner byte for byte', () => {
   const turns = [[{ name: 'bash', args: { command: 'a' }, result: big(400) }], [{ name: 'read', args: { file_path: '/x' }, result: big(10) }], [{ name: 'bash', args: { command: 'b' }, result: '🙂'.repeat(9000) }]];
   const a = makeSession(turns);
   const b = makeSession(turns);
   const official = bareP().pruneSession(a);
   assert.ok(official.pruned.length === 2);
-  const saved = applyAll(b, plan(officialPruner, b));
+  const saved = applyAll(b, plan(trimHeadTail, b));
   assert.ok(saved > 0);
   assert.equal(visible(b), visible(a));
 });
@@ -41,7 +45,7 @@ test('default pipeline delegates to the original pruner', () => {
   assert.equal(recallActive(DEFAULT_PIPELINE, registry, 'auto'), false);
 });
 
-test('magic-compact omits old bulky output, keeps recent and errors, and restore works', () => {
+test('Magic Compact preset omits old bulky output, keeps recent and errors, and restore works', () => {
   const s = makeSession([
     [{ name: 'bash', args: { command: 'npm test' }, result: big(60) }],
     [{ name: 'read', args: { file_path: '/a.js' }, result: 'y'.repeat(300) }],
@@ -49,12 +53,12 @@ test('magic-compact omits old bulky output, keeps recent and errors, and restore
     [{ name: 'ask_user_question', args: {}, result: big(60) }],
     [{ name: 'bash', args: { command: 'recent' }, result: big(60) }],
   ]);
-  const cands = plan(magicCompact, s, { keepRecent: 1 });
-  const labels = cands.map(c => c.label);
-  assert.equal(cands.length, 2, labels.join('|'));
-  applyAll(s, cands);
+  const registry = new MethodRegistry();
+  const steps = withOptions(preset('magic-compact').filter(step => step.method === 'omit-output'), { keepRecent: 1 });
+  const report = runPipeline({ session: s, meter, registry, pipeline: steps });
+  assert.deepEqual(report.steps.map(step => [step.id, step.applied]), [['reloadable', 1], ['delegated', 0], ['other', 1]]);
   const msgs = s.deriveMessages();
-  const notice = msgs.find(m => m.role === 'tool' && m.content[0].text.startsWith('[compacted'));
+  const notice = msgs.find(m => m.role === 'tool' && m.content[0].text.startsWith('[compacted') && m.content[0].text.includes('bash'));
   assert.match(notice.content[0].text, /id=r\d+/);
   assert.match(notice.content[0].text, new RegExp(RECALL_TOOL));
   const id = /id=(r\d+)/.exec(notice.content[0].text)[1];
@@ -62,10 +66,10 @@ test('magic-compact omits old bulky output, keeps recent and errors, and restore
   assert.match(original, /npm test/);
   assert.match(original, /line 59/);
   // idempotent
-  assert.equal(plan(magicCompact, s, { keepRecent: 1 }).length, 0);
+  assert.equal(runPipeline({ session: s, meter, registry, pipeline: steps }).steps.reduce((n, step) => n + step.applied, 0), 0);
 });
 
-test('opencode-dcp dedupes and purges errored inputs after N turns', () => {
+test('OpenCode DCP preset dedupes and purges failed inputs after N turns', () => {
   const turns = [
     [{ name: 'read', args: { file_path: '/a', limit: 10 }, result: 'A'.repeat(500) }],
     [{ name: 'bash', args: { command: 'boom '.repeat(100) }, result: 'Error: boom', error: true }],
@@ -73,23 +77,22 @@ test('opencode-dcp dedupes and purges errored inputs after N turns', () => {
   ];
   for (let i = 0; i < 5; i += 1) turns.push([{ name: 'bash', args: { command: `n${i}` }, result: 'ok' }]);
   const s = makeSession(turns);
-  const cands = plan(opencodeDcp, s);
-  assert.deepEqual(cands.map(c => c.reason).sort(), ['dedupe', 'purge errors']);
   const before = s.surface.nodes.length;
-  applyAll(s, cands);
+  const report = runPipeline({ session: s, meter, registry: new MethodRegistry(), pipeline: preset('opencode-dcp') });
+  assert.deepEqual(report.steps.map(step => [step.method, step.applied]), [['dedupe', 1], ['purge-errors', 1], ['trim-head-tail', 0]]);
   assert.equal(s.surface.nodes.length, before - 1);
-  const fold = s.deriveMessages().find(m => m.role === 'user' && m.content[0].text.includes('errored tool calls'));
+  const fold = s.deriveMessages().find(m => m.role === 'user' && m.content[0].text.includes('failed tool calls'));
   assert.match(fold.content[0].text, /Error: boom/);
   assert.doesNotMatch(fold.content[0].text, /boom boom boom/);
   const id = /id=(c\d+)/.exec(fold.content[0].text)[1];
   assert.match(recoverOriginal(liveAccessor(s), id), /boom boom boom/);
 });
 
-test('fold-tool-calls folds big write arguments and survives replay', () => {
+test('fold-calls folds big write arguments and survives replay', () => {
   const turns = [[{ name: 'write', args: { file_path: '/f.js', content: 'z'.repeat(5000) }, result: 'wrote' }]];
   for (let i = 0; i < 5; i += 1) turns.push([{ name: 'bash', args: { command: `n${i}` }, result: 'ok' }]);
   const s = makeSession(turns);
-  const cands = plan(foldToolCalls, s);
+  const cands = plan(foldCalls, s);
   assert.equal(cands.length, 1);
   assert.ok(applyAll(s, cands) > 1000);
   const text = JSON.stringify(s.deriveMessages());
@@ -111,13 +114,14 @@ test('preview does not mutate and reports savings per step', () => {
   const s = makeSession([[{ name: 'bash', args: {}, result: big(400) }], [{ name: 'bash', args: {}, result: big(100) }], [{ name: 'bash', args: {}, result: 'ok' }]]);
   const before = s.seq;
   const registry = new MethodRegistry();
-  const pipeline = [{ method: 'official-pruner', enabled: true, options: {} }, { method: 'magic-compact', enabled: true, options: { keepRecent: 0 } }];
+  const pipeline = [{ method: 'trim-head-tail' }, { method: 'omit-output', options: { keepRecent: 0 } }, { method: 'dedupe', enabled: false }];
   const result = previewSession(surfaceEntries(liveAccessor(s)), pipeline, registry, meter.estimateMessage, bareP().config);
   assert.equal(s.seq, before);
   assert.ok(result.afterTokens < result.beforeTokens);
   assert.equal(result.steps[0].items.length, 1);
   assert.equal(result.steps[1].items.length, 2);
-  assert.equal(result.steps.find(st => st.method === 'opencode-dcp').enabled, false);
+  assert.equal(result.steps.find(st => st.method === 'dedupe').enabled, false);
+  assert.deepEqual(result.steps.map(st => st.id), ['trim-head-tail', 'omit-output', 'dedupe']);
 });
 
 test('extension methods register, plan, and unregister', () => {
@@ -159,4 +163,106 @@ test('integration wraps and restores official prototypes', async () => {
   assert.equal(new P().pruneSession(), 'orig');
   overrides = { thresholdRatio: 0.5 };
   assert.equal(await engine.compactIfNeeded(), 0.8);
+});
+
+const LONG_DESC = 'Run the full integration suite against the staging database and report every failing test with its stack trace';
+
+test('every notice keeps the full description', () => {
+  const turns = [
+    [{ name: 'bash', args: { command: 'npm test', description: LONG_DESC }, result: big(80) }],
+    [{ name: 'write', args: { file_path: '/f.js', content: 'z'.repeat(3000), description: LONG_DESC + ' (write)' }, result: 'wrote' }],
+  ];
+  for (let i = 0; i < 5; i += 1) turns.push([{ name: 'bash', args: { command: `n${i}` }, result: 'ok' }]);
+  const a = makeSession(turns);
+  applyAll(a, plan(omitOutput, a, { keepRecent: 0 }));
+  const notice = a.deriveMessages().find(m => m.role === 'tool' && m.content[0].text.startsWith('[compacted'));
+  assert.ok(notice.content[0].text.includes(`description: ${LONG_DESC}`), notice.content[0].text);
+  const b = makeSession(turns);
+  applyAll(b, plan(foldCalls, b));
+  const fold = b.deriveMessages().find(m => m.role === 'user' && m.content[0].text.includes('original call structure folded'));
+  assert.ok(fold.content[0].text.includes(`description: ${LONG_DESC} (write)`), fold.content[0].text);
+});
+
+test('fold-calls description level keeps only tool names and descriptions above the threshold', () => {
+  const turns = [
+    [{ name: 'bash', args: { command: 'cat huge.log', description: LONG_DESC }, result: big(200) }, { name: 'read', args: { file_path: '/secret-detail.txt' }, result: 'R'.repeat(3000), error: true }],
+    [{ name: 'bash', args: { command: 'ls', description: 'list files' }, result: 'a b c' }],
+  ];
+  for (let i = 0; i < 5; i += 1) turns.push([{ name: 'bash', args: { command: `n${i}` }, result: 'ok' }]);
+  const s = makeSession(turns);
+  const DESC = { detail: 'description', minTotalChars: 4096, minArgsChars: 0 };
+  const cands = plan(foldCalls, s, DESC);
+  assert.equal(cands.length, 1, 'only the large group qualifies');
+  assert.ok(applyAll(s, cands) > 1000);
+  const fold = s.deriveMessages().find(m => m.role === 'user' && m.content[0].text.includes('only descriptions kept'));
+  const text = fold.content[0].text;
+  assert.ok(text.includes(`• bash: ${LONG_DESC}`), text);
+  assert.match(text, /• read\(file_path=\/secret-detail\.txt\) \[error\]/);
+  assert.doesNotMatch(text, /cat huge\.log|line 199|RRRR/);
+  assert.match(text, /working on 1/);
+  const id = /id=(c\d+)/.exec(text)[1];
+  const original = recoverOriginal(liveAccessor(s), id);
+  assert.match(original, /cat huge\.log/);
+  assert.match(original, /line 199/);
+  // already-folded groups are not folded again, and the log replays
+  assert.equal(plan(foldCalls, s, DESC).length, 0);
+  const events = s.snapshotEvents();
+  assert.deepEqual(foldSurface(events).nodes, [...s.surface.nodes]);
+});
+
+test('0.1.x pipelines migrate to atomic steps with unique ids', () => {
+  const legacyDefault = [
+    { method: 'official-pruner', enabled: true, options: {} },
+    { method: 'magic-compact', enabled: false, options: {} },
+    { method: 'opencode-dcp', enabled: false, options: {} },
+    { method: 'fold-tool-calls', enabled: false, options: {} },
+  ];
+  assert.deepEqual(normalizePipeline(legacyDefault), normalizePipeline(DEFAULT_PIPELINE));
+  const migrated = normalizePipeline([
+    { method: 'official-pruner', enabled: true, options: { thresholdChars: 9000 } },
+    { method: 'magic-compact', enabled: true, options: { keepRecent: 1, maxChars: 2000 } },
+    { method: 'opencode-dcp', enabled: true, options: { supersededReads: true, purgeErrors: false } },
+    { method: 'fold-tool-calls', enabled: true, options: { minResultChars: 5000 } },
+  ]);
+  assert.deepEqual(migrated.map(step => step.method), ['trim-head-tail', 'omit-output', 'omit-output', 'omit-output', 'dedupe', 'drop-superseded-reads', 'fold-calls']);
+  assert.equal(migrated[0].options.thresholdChars, 9000);
+  assert.equal(migrated[3].options.minChars, 2000);
+  assert.equal(migrated[3].options.keepRecent, 1);
+  assert.equal(migrated[6].options.minTotalChars, 5000);
+  assert.equal(new Set(migrated.map(step => step.id)).size, migrated.length);
+  const repeated = normalizePipeline([{ method: 'fold-calls' }, { method: 'fold-calls' }, { id: 'fold-calls', method: 'fold-calls' }]);
+  assert.deepEqual(repeated.map(step => step.id), ['fold-calls', 'fold-calls-2', 'fold-calls-3']);
+});
+
+test('every built-in preset resolves to registered methods with valid options', () => {
+  const registry = new MethodRegistry();
+  const presets = registry.describePresets();
+  assert.deepEqual(presets.map(p => p.id), ['official', 'magic-compact', 'opencode-dcp', 'aggressive']);
+  for (const p of presets) {
+    for (const step of p.steps) {
+      const method = registry.get(step.method);
+      assert.ok(method, `${p.id}: ${step.method}`);
+      assert.doesNotThrow(() => resolveOptions(method, step.options), `${p.id}/${step.id}`);
+    }
+  }
+  assert.throws(() => registry.registerPreset({ id: 'official', steps: [{ method: 'dedupe' }] }));
+  const dispose = registry.registerPreset({ id: 'mine', name: 'Mine', steps: [{ method: 'dedupe' }] });
+  assert.ok(registry.describePresets().some(p => p.id === 'mine'));
+  dispose();
+  assert.ok(!registry.describePresets().some(p => p.id === 'mine'));
+});
+
+test('aggressive preset keeps descriptions for large calls and summaries for large arguments', () => {
+  const turns = [
+    [{ name: 'bash', args: { command: 'cat huge.log', description: LONG_DESC }, result: big(200) }],
+    [{ name: 'write', args: { file_path: '/w.js', content: 'q'.repeat(1500), description: 'write the helper' }, result: 'ok' }],
+  ];
+  for (let i = 0; i < 5; i += 1) turns.push([{ name: 'bash', args: { command: `n${i}` }, result: 'ok' }]);
+  const s = makeSession(turns);
+  const report = runPipeline({ session: s, meter, registry: new MethodRegistry(), pipeline: preset('aggressive') });
+  assert.deepEqual(report.steps.map(step => [step.id, step.applied]), [['dedupe', 0], ['errors', 0], ['description', 1], ['fold', 1], ['trim', 0]]);
+  const texts = s.deriveMessages().filter(m => m.role === 'user').map(m => m.content[0].text).join('\n');
+  assert.ok(texts.includes(`• bash: ${LONG_DESC}`));
+  assert.match(texts, /original call structure folded[\s\S]*write\(file_path=\/w\.js/);
+  assert.match(texts, /description: write the helper/);
 });

@@ -34,8 +34,17 @@ const zh = {
   inactive: '未提供',
   prunerCalls: '压缩触发次数',
   sectionPipeline: '压缩步骤与顺序',
-  pipelineHint: '压缩被触发后（上下文超过阈值、溢出报错或切换模型），先按下面的顺序执行启用的步骤，这些步骤都不调用模型。执行后如果仍超过阈值，再由 compaction-basic 做 LLM 摘要。默认只启用官方的首尾裁剪，行为与原版一致。',
-  resetPipeline: '恢复默认步骤',
+  pipelineHint: '压缩被触发后（上下文超过阈值、溢出报错或切换模型），先按顺序执行启用的步骤，这些步骤都不调用模型。执行后如果仍超过阈值，再由 compaction-basic 做 LLM 摘要。每种方法只做一件事，可以多次添加并使用不同参数；预设是现成的组合，应用后可以继续修改。默认是「官方默认」，行为与原版一致。',
+  presets: '预设',
+  applyPreset: '应用',
+  presetActive: '当前',
+  presetSteps: '{count} 个步骤',
+  steps: '步骤（按顺序执行）',
+  noSteps: '没有步骤：压缩触发时直接交给 compaction-basic 做 LLM 摘要。',
+  addStep: '添加步骤',
+  removeStep: '删除步骤',
+  tagOnly: '仅',
+  tagExclude: '排除',
   moveUp: '上移',
   moveDown: '下移',
   enabled: '启用',
@@ -147,8 +156,17 @@ const en = {
   inactive: 'not offered',
   prunerCalls: 'Compaction triggers',
   sectionPipeline: 'Compaction steps and order',
-  pipelineHint: 'When compaction triggers (pressure, context overflow, or a model switch), the enabled steps below run in order without any model call. If the context is still over the threshold, compaction-basic writes an LLM summary. By default only the official head/tail trim is enabled, matching stock behavior.',
-  resetPipeline: 'Reset steps',
+  pipelineHint: 'When compaction triggers (pressure, context overflow, or a model switch), the enabled steps run in order without any model call. If the context is still over the threshold, compaction-basic writes an LLM summary. Each method does one thing and can be added several times with different options; presets are ready-made combinations you can edit after applying. The default is “Official default”, matching stock behavior.',
+  presets: 'Presets',
+  applyPreset: 'Apply',
+  presetActive: 'Current',
+  presetSteps: '{count} step(s)',
+  steps: 'Steps (run in order)',
+  noSteps: 'No steps: on a compaction trigger, compaction-basic writes its LLM summary directly.',
+  addStep: 'Add step',
+  removeStep: 'Remove step',
+  tagOnly: 'only',
+  tagExclude: 'except',
   moveUp: 'Move up',
   moveDown: 'Move down',
   enabled: 'Enabled',
@@ -318,6 +336,11 @@ const CSS = `
 .cm-switch[aria-checked=true]::after{left:16px}
 .cm-switch:disabled{opacity:.45;cursor:default}
 .cm-final{border-style:dashed}
+.cm-label{font-size:12px;font-weight:600;color:var(--dsw-alias-label-tertiary);text-transform:uppercase;letter-spacing:.04em;margin-top:6px}
+.cm-presets{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:8px}
+.cm-preset{border:1px solid var(--dsw-alias-border-l2);border-radius:10px;padding:10px 12px;background:var(--dsw-alias-bg-base);display:flex;flex-direction:column;gap:4px}
+.cm-preset.active{border-color:var(--dsw-alias-state-business-primary)}
+.cm-add{border:1px dashed var(--dsw-alias-border-l3);border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:6px}
 .cm-bar{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:10px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2)}
 .cm-msg{font-size:12.5px;color:var(--dsw-alias-label-secondary)}
 .cm-msg.err{color:var(--dsw-alias-state-error-primary)}
@@ -392,26 +415,51 @@ function StepOptionField({ option, value, lang, t, disabled, onChange }) {
     h('input', { className: 'cm-input', disabled, value: value ?? '', placeholder: String(def ?? ''), onChange: e => onChange(e.target.value === '' ? undefined : e.target.value) }));
 }
 
-function StepCard({ step, index, count, method, lang, t, disabled, onToggle, onMove, onOptions }) {
+/** Short tag of a step's distinguishing options, e.g. "> 200 · read, skill". */
+function stepTag(method, options, lang, t) {
+  if (!method) return '';
+  const parts = [];
+  for (const key of method.tagKeys ?? []) {
+    const option = method.options.find(item => item.key === key);
+    if (!option) continue;
+    const value = options[key] ?? method.defaults?.[key];
+    if (option.type === 'list') {
+      if (!Array.isArray(value) || value.length === 0) continue;
+      const shown = value.slice(0, 4).join(', ') + (value.length > 4 ? ` +${value.length - 4}` : '');
+      parts.push(`${key === 'excludeTools' ? t('tagExclude') : t('tagOnly')} ${shown}`);
+    } else if (option.type === 'select') {
+      const choice = option.choices?.find(item => item.value === value);
+      parts.push(choice?.label?.[lang] ?? String(value));
+    } else if (option.type === 'number') {
+      if (value === 0 && /\b0\b/.test(option.label?.en ?? '')) continue;
+      parts.push(`${option.label?.[lang] ?? key} ${value}`);
+    }
+  }
+  return parts.join(' · ');
+}
+
+function StepCard({ step, index, count, method, lang, t, disabled, onToggle, onMove, onRemove, onOptions }) {
   const [open, setOpen] = React.useState(false);
   const missing = method === undefined;
   const name = missing ? step.method : (method.name?.[lang] ?? method.id);
   const options = step.options ?? {};
   const effective = method ? { ...method.defaults, ...options } : options;
-  const recall = method?.recall || (method?.id === 'official-pruner' && effective.recallHint === true);
+  const recall = method?.id === 'trim-head-tail' ? effective.recallHint === true : method?.recall;
+  const tag = stepTag(method, options, lang, t);
   return h('div', { className: `cm-step${step.enabled ? '' : ' off'}` },
     h('div', { className: 'cm-step-top' },
       h('div', { className: 'cm-idx' }, index + 1),
       h('div', { className: 'cm-grow' },
         h('div', { className: 'cm-row' },
           h('span', { className: 'cm-name' }, name),
-          method?.official ? h('span', { className: 'cm-badge brand' }, t('official')) : null,
           method && !method.builtin ? h('span', { className: 'cm-badge' }, t('extension')) : null,
           missing ? h('span', { className: 'cm-badge warn' }, t('missingMethod')) : h('span', { className: 'cm-badge' }, recall ? t('recallYes') : t('recallNo'))),
+        tag ? h('div', { className: 'cm-sum cm-mono' }, tag) : null,
         method ? h('div', { className: 'cm-sum' }, method.summary?.[lang]) : null),
       h('button', { type: 'button', className: 'cm-btn ghost', title: t('moveUp'), 'aria-label': t('moveUp'), disabled: disabled || index === 0, onClick: () => onMove(-1) }, '↑'),
       h('button', { type: 'button', className: 'cm-btn ghost', title: t('moveDown'), 'aria-label': t('moveDown'), disabled: disabled || index === count - 1, onClick: () => onMove(1) }, '↓'),
       method ? h('button', { type: 'button', className: 'cm-btn ghost', 'aria-expanded': open, onClick: () => setOpen(!open) }, open ? t('hideDetails') : t('details')) : null,
+      h('button', { type: 'button', className: 'cm-btn ghost', title: t('removeStep'), 'aria-label': `${t('removeStep')}: ${name}`, disabled, onClick: onRemove }, '✕'),
       h('button', { type: 'button', role: 'switch', 'aria-checked': step.enabled, 'aria-label': `${t('enabled')}: ${name}`, className: 'cm-switch', disabled: disabled || missing, onClick: onToggle })),
     open && method ? h('div', { className: 'cm-body' },
       h('p', { className: 'cm-details' }, method.details?.[lang]),
@@ -429,7 +477,45 @@ function StepCard({ step, index, count, method, lang, t, disabled, onToggle, onM
       Object.keys(options).length > 0 ? h('div', null, h('button', { type: 'button', className: 'cm-btn', disabled, onClick: () => onOptions({}) }, t('resetOptions'))) : null) : null);
 }
 
-function PipelineEditor({ pipeline, methods, lang, t, disabled, onChange, onReset }) {
+function uniqueStepId(pipeline, base) {
+  const used = new Set(pipeline.map(step => step.id));
+  if (!used.has(base)) return base;
+  let n = 2;
+  while (used.has(`${base}-${n}`)) n += 1;
+  return `${base}-${n}`;
+}
+
+/** Steps compared without instance ids, for matching a pipeline to a preset. */
+function stepsShape(steps) {
+  return JSON.stringify(steps.map(step => [step.method, step.enabled !== false, step.options ?? {}]));
+}
+
+function PresetBar({ presets, pipeline, lang, t, disabled, onApply }) {
+  const current = stepsShape(pipeline);
+  return h('div', { className: 'cm-presets' },
+    presets.map(preset => {
+      const active = stepsShape(preset.steps) === current;
+      return h('div', { key: preset.id, className: `cm-preset${active ? ' active' : ''}` },
+        h('div', { className: 'cm-row' },
+          h('span', { className: 'cm-name cm-grow' }, preset.name?.[lang] ?? preset.id),
+          active ? h('span', { className: 'cm-badge brand' }, t('presetActive')) : h('button', { type: 'button', className: 'cm-btn', disabled, onClick: () => onApply(preset) }, t('applyPreset'))),
+        h('div', { className: 'cm-sum' }, preset.summary?.[lang]),
+        h('div', { className: 'cm-sum cm-muted' }, fmt(t('presetSteps'), { count: preset.steps.length })));
+    }));
+}
+
+function AddStep({ methods, lang, t, disabled, onAdd }) {
+  const [choice, setChoice] = React.useState(methods[0]?.id ?? '');
+  const method = methods.find(item => item.id === choice);
+  return h('div', { className: 'cm-add' },
+    h('div', { className: 'cm-row' },
+      h('select', { className: 'cm-select cm-grow', 'aria-label': t('addStep'), disabled, value: choice, onChange: e => setChoice(e.target.value) },
+        methods.map(item => h('option', { key: item.id, value: item.id }, item.name?.[lang] ?? item.id))),
+      h('button', { type: 'button', className: 'cm-btn', disabled: disabled || !method, onClick: () => onAdd(choice) }, t('addStep'))),
+    method ? h('div', { className: 'cm-sum' }, method.summary?.[lang]) : null);
+}
+
+function PipelineEditor({ pipeline, methods, presets, lang, t, disabled, onChange }) {
   const byId = new Map(methods.map(method => [method.id, method]));
   const update = (index, patch) => onChange(pipeline.map((step, i) => (i === index ? { ...step, ...patch } : step)));
   const move = (index, delta) => {
@@ -439,19 +525,24 @@ function PipelineEditor({ pipeline, methods, lang, t, disabled, onChange, onRese
     onChange(next);
   };
   return h('div', { className: 'cm-steps' },
+    h('div', { className: 'cm-label' }, t('presets')),
+    h(PresetBar, { presets, pipeline, lang, t, disabled, onApply: preset => onChange(clone(preset.steps)) }),
+    h('div', { className: 'cm-label' }, t('steps')),
+    pipeline.length === 0 ? h('p', { className: 'cm-hint' }, t('noSteps')) : null,
     pipeline.map((step, index) => h(StepCard, {
-      key: step.method, step, index, count: pipeline.length, method: byId.get(step.method), lang, t, disabled,
+      key: step.id, step, index, count: pipeline.length, method: byId.get(step.method), lang, t, disabled,
       onToggle: () => update(index, { enabled: !step.enabled }),
       onMove: delta => move(index, delta),
+      onRemove: () => onChange(pipeline.filter((_, i) => i !== index)),
       onOptions: options => update(index, { options }),
     })),
+    h(AddStep, { methods, lang, t, disabled, onAdd: id => onChange([...pipeline, { id: uniqueStepId(pipeline, id), method: id, enabled: true, options: {} }]) }),
     h('div', { className: 'cm-step cm-final' },
       h('div', { className: 'cm-step-top' },
         h('div', { className: 'cm-idx' }, '∑'),
         h('div', { className: 'cm-grow' },
           h('div', { className: 'cm-name' }, t('finalStep')),
-          h('div', { className: 'cm-sum' }, t('finalStepHint'))))),
-    h('div', null, h('button', { type: 'button', className: 'cm-btn', disabled, onClick: onReset }, t('resetPipeline'))));
+          h('div', { className: 'cm-sum' }, t('finalStepHint'))))));
 }
 
 // ---- forms.js
@@ -521,7 +612,8 @@ function PreviewItem({ item, t }) {
 function PreviewStep({ step, methods, lang, t }) {
   const [open, setOpen] = React.useState(step.items.length > 0 && step.items.length <= 6);
   const method = methods.find(m => m.id === step.method);
-  const name = method?.name?.[lang] ?? step.method;
+  const tag = stepTag(method, step.options ?? {}, lang, t);
+  const name = `${method?.name?.[lang] ?? step.method}${tag ? ` · ${tag}` : ''}`;
   let summary;
   if (!step.enabled) summary = t('stepDisabled');
   else if (step.error) summary = `${t('stepError')}${step.error}`;
@@ -627,7 +719,7 @@ function SessionCompactionView({ ctx, sessionId }) {
           h('span', { className: 'cm-muted' }, fmt(t('surfaceInfo'), { nodes: result.nodes, tools: result.toolResults }))),
         h('div', { className: 'cm-meter' }, h('div', { style: { width: `${result.beforeTokens > 0 ? Math.max(0, Math.min(100, (result.afterTokens / result.beforeTokens) * 100)) : 100}%` } })),
         changes === 0 ? h('p', { className: 'cm-hint' }, t('viewNothing')) : null,
-        result.steps.filter(step => step.enabled).map(step => h(PreviewStep, { key: step.method, step, methods: state.methods, lang, t }))) : (busy ? h('p', { className: 'cm-muted' }, t('previewing')) : null)));
+        result.steps.filter(step => step.enabled).map(step => h(PreviewStep, { key: step.id ?? step.method, step, methods: state.methods, lang, t }))) : (busy ? h('p', { className: 'cm-muted' }, t('previewing')) : null)));
 }
 
 // ---- page.js
@@ -685,8 +777,7 @@ function CompactionPage({ ctx, form }) {
   if (state === undefined) return h('div', { className: 'cm-page' }, h('div', { className: 'cm-inner cm-muted' }, t('loading')));
 
   const saved = { pipeline: state.pipeline, basic: state.basic ?? {}, recall: state.recall ?? 'auto' };
-  const defaultFull = state.defaultPipeline.map(step => ({ method: step.method, enabled: step.enabled, options: {} }))
-    .concat(state.methods.filter(m => !state.defaultPipeline.some(s => s.method === m.id)).map(m => ({ method: m.id, enabled: false, options: {} })));
+
   const current = draft ?? saved;
   const dirty = draft !== undefined && !sameJson(draft, saved);
   const writable = snap.status === 'ready' && snap.writable;
@@ -698,7 +789,7 @@ function CompactionPage({ ctx, form }) {
     try {
       await callHost('validate', { basic: current.basic });
       const ops = [];
-      const isDefaultPipeline = sameJson(current.pipeline, defaultFull);
+      const isDefaultPipeline = sameJson(current.pipeline, state.defaultPipeline);
       ops.push(isDefaultPipeline ? { op: 'unset', path: ['pipeline'] } : { op: 'set', path: ['pipeline'], value: current.pipeline });
       ops.push(Object.keys(current.basic).length === 0 ? { op: 'unset', path: ['basic'] } : { op: 'set', path: ['basic'], value: current.basic });
       ops.push(current.recall === 'auto' ? { op: 'unset', path: ['recall'] } : { op: 'set', path: ['recall'], value: current.recall });
@@ -729,9 +820,8 @@ function CompactionPage({ ctx, form }) {
         h('h2', null, t('sectionPipeline')),
         h('p', { className: 'cm-hint' }, t('pipelineHint')),
         h(PipelineEditor, {
-          pipeline: current.pipeline, methods: state.methods, lang, t, disabled: !writable,
+          pipeline: current.pipeline, methods: state.methods, presets: state.presets ?? [], lang, t, disabled: !writable,
           onChange: pipeline => edit({ pipeline }),
-          onReset: () => edit({ pipeline: clone(defaultFull) }),
         })),
       h('section', { className: 'cm-section' },
         h('h2', null, t('sectionBasic')),
@@ -750,7 +840,7 @@ function CompactionPage({ ctx, form }) {
           state.stats.runs.map((run, index) => h('div', { key: index, className: 'cm-item' },
             h('span', { className: 'cm-muted' }, new Date(run.at).toLocaleString()), ' · ',
             h('span', { className: 'cm-mono' }, run.sessionId), ' · ',
-            run.steps.map(step => `${step.method}: ${step.applied}`).join(', '),
+            run.steps.map(step => `${step.id ?? step.method}: ${step.applied}`).join(', '),
             ` · −${compact(run.tokensSaved)} tokens`))))));
 }
 

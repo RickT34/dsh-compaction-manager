@@ -29,16 +29,31 @@ dsh plugin --profile web add dsh-compaction-manager
 
 如果想装 GitHub 上的最新提交而不是 npm 发布版，把包名换成 `github:RickT34/dsh-compaction-manager`。
 
-## 内置方法
+## 方法与预设
 
-| 方法 | 隐藏什么 | 能否取回 | 默认 |
-|---|---|---|---|
-| 官方首尾裁剪 | 超过 8192 字符的工具结果的中间部分 | 打开“附带取回 ID”后可以 | 开启 |
-| Magic Compact | 旧的、体积大的工具输出，换成省略提示（仿照 aerovato/magic-compact 的 `/magic-trim`） | 能 | 关闭 |
-| OpenCode DCP | 重复调用、若干回合前出错调用的输入，可选清理被覆盖的读取（仿照 Opencode-DCP） | 能 | 关闭 |
-| 折叠旧工具调用 | 整组调用和结果，包括调用参数，比如 `write`/`edit` 里的整段文件内容 | 能 | 关闭 |
+每种方法只做一件事，用一条规则挑选处理对象。一个步骤就是一种方法加上它自己的参数和工具范围（`tools` / `excludeTools`），同一种方法可以出现在多个步骤里。
 
-DSH 不允许单独改写工具调用的参数，所以折叠会把一条已闭合的 assistant 工具调用消息和它的结果一起换成一条 user 消息。
+| 方法 | 做什么 | 能否取回 |
+|---|---|---|
+| 首尾裁剪 | 超过 8192 字符的结果只保留开头和结尾；默认参数下与官方裁剪完全相同 | 打开“附带取回 ID”后可以 |
+| 省略输出 | 较早的、超过字符数或词数阈值的结果换成一行省略提示 | 能 |
+| 重复调用去重 | 工具和参数完全相同的调用只保留最新一次的结果 | 能 |
+| 清理被覆盖的读取 | 同一路径之后又被写入、编辑或完整读取时，清掉旧的读取结果 | 能 |
+| 清理出错调用 | 若干回合前全部出错的一组调用，折叠成工具名、description 和错误信息 | 能 |
+| 折叠工具调用 | 较早的一组调用（参数和结果）超过阈值时换成一段文字；保留级别可选摘要或仅 description | 能 |
+
+所有省略提示都完整保留调用时写的 `description` 参数。
+
+预设是现成的步骤组合。应用预设会替换当前步骤，之后可以继续修改。
+
+| 预设 | 步骤 |
+|---|---|
+| 官方默认（默认） | 首尾裁剪。行为与原版 DSH 完全一致。 |
+| Magic Compact | 三个省略输出步骤（可重新获取的工具超过 200 字符、子代理与任务类工具超过 4096、其他工具超过 1024 字符或 128 个词），最后首尾裁剪。仿照 aerovato/magic-compact 的 `/magic-trim`。 |
+| OpenCode DCP | 去重、清理被覆盖的读取（关闭）、清理 4 个回合前的出错调用、首尾裁剪。仿照 Opencode-DCP。 |
+| 激进 | 去重、清理出错调用、超过 4096 字符的旧调用只保留 description、参数超过 1024 字符的旧调用折叠成摘要、首尾裁剪。 |
+
+DSH 不允许单独改写工具调用的参数，所以折叠会把一条已闭合的 assistant 工具调用消息和它的结果一起换成一条 user 消息。0.1.x 保存的配置在读取时会自动换成等效的步骤。
 
 ## 接入方式
 
@@ -51,7 +66,7 @@ Web 版把 `compaction-basic` 和 `tool-result-pruner` 装在每个 agent preset
 
 ## 扩展
 
-其他插件可以注册新的压缩方法：
+其他插件可以注册新的压缩方法和预设：
 
 ```js
 export const inject = ['compactionMethods']
@@ -69,6 +84,12 @@ export function apply(ctx) {
         .filter(n => n.type === 'tool' && !n.pending && n.chars > options.minChars)
         .map(n => ({ type: 'result', seq: n.seq, content: [{ type: 'text', text: `[compacted · id=r${n.rootSeq}] …` }] }))
     },
+  }))
+  ctx.effect(() => ctx.compactionMethods.registerPreset({
+    id: 'my-preset',
+    name: { zh: '我的预设', en: 'My preset' },
+    summary: { zh: '…', en: '…' },
+    steps: [{ method: 'dedupe' }, { method: 'my-method', options: { minChars: 2000 } }],
   }))
 }
 ```
