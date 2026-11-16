@@ -58,14 +58,14 @@ export const BUILTIN_PRESETS = [
     builtin: true,
     name: t('激进', 'Aggressive'),
     summary: t(
-      '去重、清理出错调用后，参数加结果超过 4096 字符的旧调用只保留 description，参数超过 1024 字符的旧调用折叠成摘要，最后首尾裁剪。模型之后需要细节时要调用 restore_context。',
-      'After deduplication and purging failed calls, older calls over 4096 chars of arguments plus results keep only their descriptions, older calls with arguments over 1024 chars fold to a summary, then head/tail trim. The model must call restore_context for details.',
+      '去重、清理出错调用后，参数加结果超过 4096 字符的旧调用折叠成摘要（保留关键参数、状态和结果开头），其余参数超过 1024 字符的旧调用只保留 description，最后首尾裁剪。模型之后需要细节时要调用 restore_context。',
+      'After deduplication and purging failed calls, older calls over 4096 chars of arguments plus results fold to a summary (key arguments, status, result head), remaining older calls with arguments over 1024 chars keep only their descriptions, then head/tail trim. The model must call restore_context for details.',
     ),
     steps: [
       step('dedupe', 'dedupe'),
       step('errors', 'purge-errors'),
-      step('description', 'fold-calls', { detail: 'description', minTotalChars: 4096, minArgsChars: 0 }),
-      step('fold', 'fold-calls', { detail: 'summary', minTotalChars: 0, minArgsChars: 1024 }),
+      step('summary', 'fold-calls', { detail: 'summary', minTotalChars: 4096, minArgsChars: 0 }),
+      step('description', 'fold-calls', { detail: 'description', minTotalChars: 0, minArgsChars: 1024 }),
       step('trim', 'trim-head-tail'),
     ],
   },

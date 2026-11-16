@@ -118,9 +118,19 @@ function uniqueStepId(pipeline, base) {
   return `${base}-${n}`;
 }
 
-/** Steps compared without instance ids, for matching a pipeline to a preset. */
-function stepsShape(steps) {
-  return JSON.stringify(steps.map(step => [step.method, step.enabled !== false, step.options ?? {}]));
+function sortedJson(value) {
+  if (Array.isArray(value)) return `[${value.map(sortedJson).join(',')}]`;
+  if (value && typeof value === 'object') return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${sortedJson(value[key])}`).join(',')}}`;
+  return JSON.stringify(value);
+}
+
+/**
+ * Steps compared without instance ids and with options resolved against the
+ * method defaults, so a pipeline that only omits default values still matches.
+ */
+function stepsShape(steps, methods) {
+  const byId = new Map((methods ?? []).map(method => [method.id, method]));
+  return sortedJson(steps.map(step => [step.method, step.enabled !== false, { ...(byId.get(step.method)?.defaults ?? {}), ...(step.options ?? {}) }]));
 }
 
 function downloadJson(data, filename) {
@@ -191,8 +201,8 @@ function SavePresetForm({ pipeline, userNames, t, onSave, onCancel }) {
       h('button', { type: 'submit', className: 'cm-btn primary', disabled: busy || !trimmed || pipeline.length === 0 }, busy ? t('saving') : t('savePreset'))));
 }
 
-function PresetBar({ presets, pipeline, lang, t, disabled, userWritable, onApply, onWriteUserPresets }) {
-  const current = stepsShape(pipeline);
+function PresetBar({ presets, pipeline, methods, lang, t, disabled, userWritable, onApply, onWriteUserPresets }) {
+  const current = stepsShape(pipeline, methods);
   const [saving, setSaving] = React.useState(false);
   const [message, setMessage] = React.useState(undefined);
   const fileInput = React.useRef(null);
@@ -245,7 +255,7 @@ function PresetBar({ presets, pipeline, lang, t, disabled, userWritable, onApply
       (message.details ?? []).length > 0 ? h('ul', { className: 'cm-sum', style: { margin: '4px 0 0', paddingLeft: 18 } }, message.details.map((line, i) => h('li', { key: i }, line))) : null) : null,
     h('div', { className: 'cm-presets' },
       presets.map(preset => h(PresetCard, {
-        key: `${preset.user ? 'u' : 'b'}:${preset.id}`, preset, active: stepsShape(preset.steps) === current, lang, t, disabled,
+        key: `${preset.user ? 'u' : 'b'}:${preset.id}`, preset, active: stepsShape(preset.steps, methods) === current, lang, t, disabled,
         onApply, onExport: exportPresets, onRemove: remove,
       }))));
 }
@@ -271,7 +281,7 @@ function PipelineEditor({ pipeline, methods, presets, lang, t, disabled, onChang
     onChange(next);
   };
   return h('div', { className: 'cm-steps' },
-    h(PresetBar, { presets, pipeline, lang, t, disabled, userWritable: !disabled, onApply: preset => onChange(clone(preset.steps)), onWriteUserPresets }),
+    h(PresetBar, { presets, pipeline, methods, lang, t, disabled, userWritable: !disabled, onApply: preset => onChange(clone(preset.steps)), onWriteUserPresets }),
     h('div', { className: 'cm-label' }, t('steps')),
     pipeline.length === 0 ? h('p', { className: 'cm-hint' }, t('noSteps')) : null,
     pipeline.map((step, index) => h(StepCard, {

@@ -6,21 +6,22 @@ English | [中文](README.zh.md)
 
 In a long DeepSeek Harness session, most of the context is old tool output and tool call arguments: file reads, search results, command logs, whole files passed to `write`. Stock DSH trims only results over 8192 characters, then asks a model to summarize the oldest history. That summary costs an extra request and loses the details the agent may need later.
 
-This plugin adds a model-free stage in front of the summary. Ordered steps hide old, bulky, duplicate or failed tool calls and leave a short notice in their place. The notice keeps the call's full description and an id, so the model can call `restore_context` to read the original back. If the steps bring the context under the threshold, the LLM summary does not run at all.
+This plugin adds a model-free stage in front of the summary, and you decide exactly what that stage does: which steps run, in what order, with which thresholds, and for which tools. The steps hide old, bulky, duplicate or failed tool calls and leave a short notice in their place. The notice keeps the call's full description and an id, so the model can call `restore_context` to read the original back. If the steps bring the context under the threshold, the LLM summary does not run at all.
 
 ![Compaction panel](assets/screenshot-steps-en.png)
 
 ## What you get
 
+- **You define what compaction does.** Stock DSH compaction is fixed: one trim rule, then a summary. Here the compaction that runs is your own list of steps. Pick from six single-purpose methods, put them in any order, use the same method several times with different thresholds or for different tools, and turn steps on and off. Each step's options and tool scope are editable in the panel, and other plugins can add methods of their own.
 - **No model calls.** Every step runs locally on the session history, so it adds no requests and no cost.
 - **Nothing is lost.** Hidden content stays in the session log. The model sees what each call was for and can restore any part of it by id.
 - **Tool call arguments, too.** Besides outputs, steps can fold whole tool calls, such as a `write` that carried an entire file, down to a summary or just the call's description.
-- **Building blocks and presets.** Six single-purpose methods (trim, omit, deduplicate, drop superseded reads, purge failures, fold) can be combined in any order and repeated with different settings. Presets modeled on Magic Compact and OpenCode DCP, plus an aggressive one, get you started. Save, import and export your own.
+- **Presets to start from.** Presets modeled on Magic Compact and OpenCode DCP, plus an aggressive one, fill in the steps for you; edit them afterwards. Save your own step lists as presets, and import or export them as JSON to share.
 - **See it before it happens.** Each session gets a **Compaction** tab showing every change the steps would make, with the text before and after and the estimated tokens saved. **Compact now** applies them.
 - **One place for all compaction settings.** The official summary's threshold, retention, retries and summary model are in the same panel and apply without a restart.
 - **Safe by default.** With no configuration it behaves exactly like stock DSH. Sessions stay readable after the plugin is removed.
 
-On the session this plugin was developed in (about 470k estimated tokens, 380 tool results), a pipeline of deduplication, failed-call purging, two folding steps and the official trim cut the estimate by 31% without any model call.
+On the session this plugin was developed in (about 470k estimated tokens, 380 tool results), the Aggressive preset cut the estimate by 31% without any model call.
 
 ![Session compaction tab](assets/screenshot-preview-en.png)
 
@@ -76,7 +77,7 @@ A preset is a ready-made list of steps. **Apply** replaces the current steps, wh
 | Official default (default) | Head/tail trim. |
 | Magic Compact | Omit output for `read`, `read_image`, `skill`, `web_fetch` over 200 chars; Omit output for subagent and job tools over 4096 chars; Omit output for all other tools over 1024 chars or 128 words; head/tail trim. After the model-free `/magic-trim` rules of [aerovato/magic-compact](https://github.com/aerovato/magic-compact). |
 | OpenCode DCP | Deduplicate; drop superseded reads (off); purge failed calls after 4 turns; head/tail trim. After the automatic strategies of [Opencode-DCP](https://github.com/Tarquinen/opencode-dynamic-context-pruning). |
-| Aggressive | Deduplicate; purge failed calls; fold calls over 4096 chars to descriptions only; fold calls with over 1024 chars of arguments to a summary; head/tail trim. |
+| Aggressive | Deduplicate; purge failed calls; fold calls over 4096 chars in total to a summary; fold the remaining calls with over 1024 chars of arguments to descriptions only; head/tail trim. The largest calls lose the most, so they keep the most detail. |
 
 Neither Magic Compact nor OpenCode DCP is ported in full. The parts of those projects that call a model (Magic Compact's turn summaries, DCP's `compress` tool) are not implemented.
 

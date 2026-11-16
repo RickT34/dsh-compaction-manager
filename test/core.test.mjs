@@ -252,7 +252,7 @@ test('every built-in preset resolves to registered methods with valid options', 
   assert.ok(!registry.describePresets().some(p => p.id === 'mine'));
 });
 
-test('aggressive preset keeps descriptions for large calls and summaries for large arguments', () => {
+test('aggressive preset summarizes large calls and keeps descriptions for large arguments', () => {
   const turns = [
     [{ name: 'bash', args: { command: 'cat huge.log', description: LONG_DESC }, result: big(200) }],
     [{ name: 'write', args: { file_path: '/w.js', content: 'q'.repeat(1500), description: 'write the helper' }, result: 'ok' }],
@@ -260,11 +260,14 @@ test('aggressive preset keeps descriptions for large calls and summaries for lar
   for (let i = 0; i < 5; i += 1) turns.push([{ name: 'bash', args: { command: `n${i}` }, result: 'ok' }]);
   const s = makeSession(turns);
   const report = runPipeline({ session: s, meter, registry: new MethodRegistry(), pipeline: preset('aggressive') });
-  assert.deepEqual(report.steps.map(step => [step.id, step.applied]), [['dedupe', 0], ['errors', 0], ['description', 1], ['fold', 1], ['trim', 0]]);
-  const texts = s.deriveMessages().filter(m => m.role === 'user').map(m => m.content[0].text).join('\n');
-  assert.ok(texts.includes(`• bash: ${LONG_DESC}`));
-  assert.match(texts, /original call structure folded[\s\S]*write\(file_path=\/w\.js/);
-  assert.match(texts, /description: write the helper/);
+  assert.deepEqual(report.steps.map(step => [step.id, step.applied]), [['dedupe', 0], ['errors', 0], ['summary', 1], ['description', 1], ['trim', 0]]);
+  const texts = s.deriveMessages().filter(m => m.role === 'user').map(m => m.content[0].text);
+  const large = texts.find(text => text.includes('cat huge.log'));
+  assert.match(large, /original call structure folded/);
+  assert.ok(large.includes(`description: ${LONG_DESC}`));
+  const write = texts.find(text => text.includes('only descriptions kept'));
+  assert.match(write, /• write: write the helper/);
+  assert.doesNotMatch(write, /qqqq/);
 });
 
 test('user presets: clean untrusted input, save, merge imports, export round trip', async () => {
