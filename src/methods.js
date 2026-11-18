@@ -1,10 +1,11 @@
 // Built-in atomic compaction methods. Each does one kind of change with one
 // selection rule; presets (presets.js) combine them into named strategies.
 import {
-  MARKER_PREFIX, OFFICIAL_PRUNE_MARKER, RECALL_TOOL,
-  argsPreview, canonicalJson, clip, codePointLength, descriptionOf, eligibleResults, foldUnitContent,
-  formatChars, isCompacted, officialPruneContent, omittedResult, oneLine, parseArgs, recallLine, toolLabel, toolUnits,
+  RECALL_TOOL, canonicalJson, codePointLength, eligibleResults, formatChars, isCompacted, measureText,
+  officialPruneContent, oneLine, parseArgs, toolLabel, toolUnits,
 } from './core.js';
+import { FORMATS, foldVars, noticeContent, purgeVars } from './formats.js';
+import { render } from './format-runtime.js';
 
 const t = (zh, en) => ({ zh, en });
 const num = (key, label, defaultValue, extra = {}) => ({ key, type: 'number', label, default: defaultValue, ...extra });
@@ -52,16 +53,19 @@ export const trimHeadTail = {
     ...scopeOptions([]),
   ],
   tagKeys: ['thresholdChars', 'tools', 'excludeTools'],
+  formats: FORMATS['trim-head-tail'],
   recall: options => options.recallHint === true,
   validate(options) {
-    const emitted = options.headChars + codePointLength(OFFICIAL_PRUNE_MARKER) + options.tailChars;
+    const sample = render(options.formats.marker, { id: `r${'9'.repeat(9)}`, recall: options.recallHint, removedSize: '999.9k', removedChars: 999_999 });
+    const emitted = options.headChars + codePointLength(sample) + options.tailChars;
     if (emitted > options.thresholdChars) throw new Error(`trim-head-tail: headChars + marker + tailChars (${emitted}) must be at most thresholdChars (${options.thresholdChars})`);
   },
   plan(view, options) {
     const out = [];
     for (const node of view.nodes) {
       if (node.type !== 'tool' || node.synthetic || !inScope(node.toolName, options)) continue;
-      const marker = options.recallHint ? `\n\n[... tool result middle pruned · ${RECALL_TOOL} id=r${node.rootSeq} ...]\n\n` : OFFICIAL_PRUNE_MARKER;
+      const removed = Math.max(0, measureText(node.message.content) - options.headChars - options.tailChars);
+      const marker = render(options.formats.marker, { id: `r${node.rootSeq}`, recall: options.recallHint, removedSize: formatChars(removed), removedChars: removed });
       const content = officialPruneContent(node.message.content, options, marker);
       if (content === null) continue;
       out.push({ type: 'result', seq: node.seq, content, label: `${toolLabel(node)} · ${formatChars(node.chars)} chars`, reason: 'head/tail trim' });
@@ -92,17 +96,18 @@ export const omitOutput = {
     ...scopeOptions(),
   ],
   tagKeys: ['minChars', 'minWords', 'tools', 'excludeTools'],
+  formats: FORMATS['omit-output'],
   recall: () => true,
   plan(view, options) {
     const out = [];
     for (const node of eligibleResults(view, options.keepRecent)) {
-      if (!inScope(node.toolName, options) || isCompacted(node) || (options.skipErrors && node.isError)) continue;
+      if (!inScope(node.toolName, options) || isCompacted(node, view) || (options.skipErrors && node.isError)) continue;
       const words = options.minWords > 0 ? node.text.split(/\s+/).filter(Boolean).length : 0;
       const overChars = node.chars > options.minChars;
       const overWords = options.minWords > 0 && words > options.minWords;
       if (!overChars && !overWords) continue;
       const reason = overChars ? `omitted output over ${formatChars(options.minChars)} chars` : `omitted output over ${options.minWords} words`;
-      out.push({ type: 'result', seq: node.seq, content: omittedResult(node, { reason, previewChars: options.previewChars }), label: `${toolLabel(node)} · ${formatChars(node.chars)} chars`, reason: 'omit' });
+      out.push({ type: 'result', seq: node.seq, content: noticeContent(options.formats.notice, node, { reason, previewChars: options.previewChars }), label: `${toolLabel(node)} · ${formatChars(node.chars)} chars`, reason: 'omit' });
     }
     return out;
   },
@@ -127,6 +132,7 @@ export const dedupe = {
     ...scopeOptions([...PROTECTED_TOOLS, 'skill', 'subagent', 'subagent_fork']),
   ],
   tagKeys: ['tools', 'excludeTools'],
+  formats: FORMATS.dedupe,
   recall: () => true,
   plan(view, options) {
     const eligible = new Set(eligibleResults(view, options.keepRecent).map(node => node.seq));
@@ -143,8 +149,9 @@ export const dedupe = {
       if (group.length < 2) continue;
       const newest = group[group.length - 1];
       for (const node of group.slice(0, -1)) {
-        if (!eligible.has(node.seq) || isCompacted(node) || node.chars < options.minChars) continue;
-        out.push({ type: 'result', seq: node.seq, content: omittedResult(node, { reason: `duplicate of newer call (result id=r${newest.rootSeq})` }), label: `${node.toolName} · ${formatChars(node.chars)} chars`, reason: 'dedupe' });
+        if (!eligible.has(node.seq) || isCompacted(node, view) || node.chars < options.minChars) continue;
+        const newerId = `r${newest.rootSeq}`;
+        out.push({ type: 'result', seq: node.seq, content: noticeContent(options.formats.notice, node, { reason: `duplicate of newer call (result id=${newerId})`, extra: { newerId } }), label: `${node.toolName} · ${formatChars(node.chars)} chars`, reason: 'dedupe' });
       }
     }
     return out;
@@ -183,19 +190,20 @@ export const supersededReads = {
     num('keepRecent', t('保留最近 N 个结果', 'Keep newest N results'), 2, { min: 0 }),
   ],
   tagKeys: ['readTools'],
+  formats: FORMATS['drop-superseded-reads'],
   recall: () => true,
   plan(view, options) {
     const eligible = new Set(eligibleResults(view, options.keepRecent).map(node => node.seq));
     const results = view.nodes.filter(node => node.type === 'tool' && !node.synthetic);
     const out = [];
     for (const [index, node] of results.entries()) {
-      if (!options.readTools.includes(node.toolName ?? '') || !eligible.has(node.seq) || isCompacted(node) || node.chars < options.minChars) continue;
+      if (!options.readTools.includes(node.toolName ?? '') || !eligible.has(node.seq) || isCompacted(node, view) || node.chars < options.minChars) continue;
       const path = pathOf(node);
       if (path === undefined) continue;
       const later = results.slice(index + 1).find(other => !other.isError && pathOf(other) === path
         && (options.writeTools.includes(other.toolName ?? '') || (options.readTools.includes(other.toolName ?? '') && isFullRead(other))));
       if (later === undefined) continue;
-      out.push({ type: 'result', seq: node.seq, content: omittedResult(node, { reason: `superseded by later ${later.toolName} of ${path}` }), label: `${node.toolName} ${oneLine(path, 60)}`, reason: 'superseded read' });
+      out.push({ type: 'result', seq: node.seq, content: noticeContent(options.formats.notice, node, { reason: `superseded by later ${later.toolName} of ${path}`, extra: { path, laterTool: later.toolName } }), label: `${node.toolName} ${oneLine(path, 60)}`, reason: 'superseded read' });
     }
     return out;
   },
@@ -220,6 +228,7 @@ export const purgeErrors = {
     ...scopeOptions(),
   ],
   tagKeys: ['errorTurns'],
+  formats: FORMATS['purge-errors'],
   recall: () => true,
   plan(view, options) {
     const eligible = new Set(eligibleResults(view, options.keepRecent).map(node => node.seq));
@@ -228,32 +237,12 @@ export const purgeErrors = {
       if (!unitInScope(unit, options) || !unit.results.every(result => result.isError && eligible.has(result.seq))) continue;
       const turn = unit.assistant.turn;
       if (typeof turn !== 'number' || view.maxTurn - turn < options.errorTurns) continue;
-      const id = `c${unit.assistant.rootSeq}`;
-      const lines = [`${MARKER_PREFIX} failed tool calls · id=${id} · inputs purged after ${options.errorTurns} turns]`];
-      for (const result of unit.results) {
-        const description = descriptionOf(result.args);
-        lines.push(`• ${toolLabel(result)}${description === undefined ? '' : ` (description: ${description})`} failed: ${clip(result.text.trim(), 400)}`);
-      }
-      lines.push(recallLine(id));
-      out.push({ type: 'fold', startSeq: unit.startSeq, endSeq: unit.endSeq, content: [{ type: 'text', text: lines.join('\n') }], label: `${unit.results.map(toolLabel).join(', ')} (error)`, reason: 'purge errors' });
+      const text = render(options.formats.fold, purgeVars(unit, options.errorTurns));
+      out.push({ type: 'fold', startSeq: unit.startSeq, endSeq: unit.endSeq, content: [{ type: 'text', text }], label: `${unit.results.map(toolLabel).join(', ')} (error)`, reason: 'purge errors' });
     }
     return out;
   },
 };
-
-function descriptionOnlyContent(unit, options, total) {
-  const id = `c${unit.assistant.rootSeq}`;
-  const lines = [`${MARKER_PREFIX} tool calls · id=${id} · ${unit.results.length} call(s), ${formatChars(total)} chars; only descriptions kept]`];
-  const said = unit.assistant.text.trim();
-  if (said.length > 0) lines.push(`assistant said: ${clip(said, options.assistantTextChars)}`);
-  for (const result of unit.results) {
-    const description = descriptionOf(result.args);
-    const error = result.isError ? ' [error]' : '';
-    lines.push(description === undefined ? `• ${toolLabel(result)}(${argsPreview(result.args, 80)})${error}` : `• ${toolLabel(result)}${error}: ${description}`);
-  }
-  lines.push(recallLine(id));
-  return [{ type: 'text', text: lines.join('\n') }];
-}
 
 // ⑥ Fold calls — replace a whole closed call group (input and output) with text.
 export const foldCalls = {
@@ -281,6 +270,7 @@ export const foldCalls = {
     ...scopeOptions(),
   ],
   tagKeys: ['detail', 'minTotalChars', 'minArgsChars', 'tools', 'excludeTools'],
+  formats: FORMATS['fold-calls'],
   recall: () => true,
   plan(view, options) {
     const units = toolUnits(view);
@@ -293,7 +283,9 @@ export const foldCalls = {
       const overTotal = options.minTotalChars > 0 && total > options.minTotalChars;
       const overArgs = options.minArgsChars > 0 && argsChars > options.minArgsChars;
       if (!overTotal && !overArgs) continue;
-      const content = options.detail === 'description' ? descriptionOnlyContent(unit, options, total) : foldUnitContent(unit, options);
+      const description = options.detail === 'description';
+      const vars = foldVars(unit, { ...options, argsMax: description ? 80 : 160 });
+      const content = [{ type: 'text', text: render(description ? options.formats.description : options.formats.summary, vars) }];
       out.push({ type: 'fold', startSeq: unit.startSeq, endSeq: unit.endSeq, content, label: `${unit.results.map(toolLabel).join(', ')} · args ${formatChars(argsChars)}, results ${formatChars(resultChars)}`, reason: options.detail === 'description' ? 'description only' : 'fold' });
     }
     return out;

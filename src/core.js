@@ -1,3 +1,5 @@
+import { resolveFormats } from './format-runtime.js';
+
 // Pure, model-free compaction pipeline core: surface views, method plans,
 // candidate simulation, and marker rendering. No Node or DSH imports, so the
 // same code runs for live writes, previews, and tests.
@@ -61,7 +63,7 @@ const ROLE_TYPE = { system: 'system', developer: 'developer', user: 'user', assi
  * Build a read-only view of the model-visible surface.
  * @param entries - [{ seq, rootSeq, eventType, message }] in surface order.
  */
-export function buildView(entries) {
+export function buildView(entries, { markers } = {}) {
   const calls = new Map();
   const nodes = [];
   let maxTurn = 0;
@@ -107,7 +109,7 @@ export function buildView(entries) {
   let lastAssistant = -1;
   for (const node of nodes) if (node.type === 'assistant') lastAssistant = node.index;
   for (const node of nodes) node.pending = node.index > lastAssistant;
-  return { nodes, calls, maxTurn };
+  return { nodes, calls, maxTurn, markers: markers ?? [MARKER_PREFIX] };
 }
 
 /** Tool-result nodes eligible for model-free methods, newest `keepRecent` results excluded. */
@@ -144,8 +146,9 @@ export function toolUnits(view) {
   return units;
 }
 
-export function isCompacted(node) {
-  return node.text.startsWith(MARKER_PREFIX);
+/** Whether a node's text starts with a notice this plugin writes. */
+export function isCompacted(node, view) {
+  return (view?.markers ?? [MARKER_PREFIX]).some(prefix => node.text.startsWith(prefix));
 }
 
 export function nonText(blocks) {
@@ -189,21 +192,6 @@ export function argsPreview(raw, max = 160) {
   return oneLine(typeof raw === 'string' ? raw : JSON.stringify(raw ?? ''), max);
 }
 
-/** `name(key args)` followed by the full description when the call has one. */
-export function callLabel(name, raw, max = 160) {
-  const description = descriptionOf(raw);
-  return `${name}(${argsPreview(raw, max)})${description === undefined ? '' : ` · description: ${description}`}`;
-}
-
-/** Omission notice replacing one tool result; keeps non-text blocks. */
-export function omittedResult(node, { reason, previewChars = 0 }) {
-  const id = `r${node.rootSeq}`;
-  const lines = node.text.split('\n').length;
-  const head = `${MARKER_PREFIX} · id=${id} · ${callLabel(toolLabel(node), node.args, 120)} · ${reason} · ${formatChars(node.chars)} chars, ${lines} lines]`;
-  const preview = previewChars > 0 ? `\n${clip(node.text, previewChars)}` : '';
-  return [{ type: 'text', text: `${head}${preview}\n${recallLine(id)}` }, ...nonText(node.message.content)];
-}
-
 /** Exact official head/middle/tail pruning (dsh-compaction-tool-result-pruner). */
 export function officialPruneContent(blocks, { thresholdChars, headChars, tailChars }, marker = OFFICIAL_PRUNE_MARKER) {
   const totalChars = measureText(blocks);
@@ -230,26 +218,6 @@ export function officialPruneContent(blocks, { thresholdChars, headChars, tailCh
   const after = measureText(pruned);
   if (after > thresholdChars || after >= totalChars) return null;
   return pruned;
-}
-
-/** Text summary of one folded tool unit. */
-export function foldUnitContent(unit, { assistantTextChars = 600, resultPreviewChars = 120 } = {}) {
-  const id = `c${unit.assistant.rootSeq}`;
-  const lines = [`${MARKER_PREFIX} tool calls · id=${id} · ${unit.results.length} call(s); original call structure folded to save context]`];
-  const said = unit.assistant.text.trim();
-  if (said.length > 0) lines.push(`assistant said: ${clip(said, assistantTextChars)}`);
-  for (const result of unit.results) {
-    const status = result.isError ? 'error' : 'ok';
-    const first = oneLine(result.text, resultPreviewChars);
-    const args = String(result.args ?? '');
-    const description = descriptionOf(args);
-    lines.push(`• ${toolLabel(result)}(${argsPreview(args)}${codePointLength(args) > 160 ? `; args ${formatChars(codePointLength(args))} chars` : ''}) → ${status}, ${formatChars(result.chars)} chars${first ? `: ${first}` : ''}`);
-    if (description !== undefined) lines.push(`  description: ${description}`);
-  }
-  const images = unit.results.reduce((count, result) => count + nonText(result.message.content).length, 0);
-  if (images > 0) lines.push(`(${images} non-text block(s) omitted)`);
-  lines.push(recallLine(id));
-  return [{ type: 'text', text: lines.join('\n') }];
 }
 
 function messageWithContent(message, content) {
@@ -309,8 +277,11 @@ export function normalizeCandidates(view, candidates) {
 
 // ---------------------------------------------------------------- options
 
-/** Resolve option values against declared defaults and bounds. */
-export function resolveOptions(method, raw = {}) {
+/**
+ * Resolve option values against declared defaults and bounds. Methods that
+ * declare formats also get `formats`: the template for each format key.
+ */
+export function resolveOptions(method, raw = {}, formats = undefined) {
   const out = {};
   for (const option of method.options ?? []) {
     let value = raw?.[option.key];
@@ -330,6 +301,7 @@ export function resolveOptions(method, raw = {}) {
     }
     out[option.key] = value;
   }
+  if (Array.isArray(method.formats) && method.formats.length > 0) out.formats = resolveFormats(method, formats);
   if (typeof method.validate === 'function') method.validate(out);
   return out;
 }
@@ -337,11 +309,12 @@ export function resolveOptions(method, raw = {}) {
 /**
  * Plan and simulate a whole pipeline over surface entries.
  * @param entries - surface entries from a session snapshot.
- * @param steps - [{ id, method, enabled, options }] resolved against `methods`.
+ * @param steps - [{ id, method, enabled, options, formats }] resolved against `methods`.
  * @param methods - Map of method id to definition.
  * @param estimate - message token estimator.
+ * @param markers - text prefixes that identify already-compacted results.
  */
-export function previewPipeline(entries, steps, methods, estimate) {
+export function previewPipeline(entries, steps, methods, estimate, markers = undefined) {
   let current = entries;
   const total = list => list.reduce((sum, entry) => sum + estimate(entry.message), 0);
   const beforeTokens = total(current);
@@ -352,12 +325,18 @@ export function previewPipeline(entries, steps, methods, estimate) {
     if (method === undefined) { reports.push({ ...base, enabled: step.enabled, missing: true, items: [], savedTokens: 0 }); continue; }
     if (!step.enabled) { reports.push({ ...base, enabled: false, items: [], savedTokens: 0 }); continue; }
     let options;
-    try { options = resolveOptions(method, step.options); } catch (error) {
+    let view;
+    let candidates;
+    try {
+      options = resolveOptions(method, step.options, step.formats);
+      view = buildView(current, { markers });
+      candidates = normalizeCandidates(view, method.plan(view, options) ?? []);
+    } catch (error) {
       reports.push({ ...base, enabled: true, error: String(error?.message ?? error), items: [], savedTokens: 0 });
       continue;
     }
-    const view = buildView(current);
-    const candidates = normalizeCandidates(view, method.plan(view, options) ?? []);
+    // Live compaction never makes text larger; skip the same candidates here.
+    candidates = candidates.filter(candidate => shrinks(view, candidate, estimate));
     const { entries: next, applied } = simulate(current, candidates);
     const items = applied.map(({ candidate, before, after }) => {
       const beforeTokensItem = before.reduce((sum, message) => sum + estimate(message), 0);
@@ -376,6 +355,21 @@ export function previewPipeline(entries, steps, methods, estimate) {
     current = next;
   }
   return { beforeTokens, afterTokens: total(current), steps: reports };
+}
+
+function shrinks(view, candidate, estimate) {
+  if (candidate.type === 'result') {
+    const node = view.nodes.find(item => item.seq === candidate.seq);
+    return node !== undefined && estimate({ ...node.message, content: candidate.content }) < estimate(node.message);
+  }
+  if (candidate.type === 'fold') {
+    const start = view.nodes.findIndex(item => item.seq === candidate.startSeq);
+    const end = view.nodes.findIndex(item => item.seq === candidate.endSeq);
+    if (start < 0 || end < start) return false;
+    const before = view.nodes.slice(start, end + 1).reduce((sum, item) => sum + estimate(item.message), 0);
+    return estimate({ role: 'user', content: candidate.content, source: { kind: 'compaction-manager' } }) < before;
+  }
+  return false;
 }
 
 /** Human-readable rendering of one message for previews. */

@@ -6,6 +6,7 @@ import { DEFAULT_PIPELINE, MethodRegistry, normalizePipeline } from './registry.
 import { installIntegration, cleanBasicOverrides } from './integration.js';
 import { enabledSteps, estimatorOf, fallbackEstimate, isDefaultPipeline, previewSession, recallActive, runPipeline } from './pipeline.js';
 import { liveAccessor, recoverOriginal, snapshotAccessor, surfaceEntries } from './session-view.js';
+import { render } from './format-runtime.js';
 import { cleanPreset, exportFile, mergeImported, parsePresetFile, savePreset, storedUserPresets, toStored } from './user-presets.js';
 
 export const name = 'compaction-manager';
@@ -16,6 +17,7 @@ const stepSchema = z.object({
   method: z.string(),
   enabled: z.boolean().default(true),
   options: z.dict(z.any()).default({}),
+  formats: z.dict(z.string()),
 });
 
 export const Config = z.object({
@@ -99,6 +101,8 @@ export function apply(ctx, config) {
     // Callers own the returned disposers: ctx.effect(() => ctx.compactionMethods.register(method)).
     register: method => registry.register(method),
     registerPreset: preset => registry.registerPreset(preset),
+    // Render a format template: ctx.compactionMethods.render(options.formats.notice, vars).
+    render: (template, vars) => render(template, vars),
     list: () => registry.describe(),
     presets: () => allPresets(),
   });

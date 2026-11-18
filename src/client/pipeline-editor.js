@@ -71,8 +71,10 @@ function stepTag(method, options, lang, t) {
   return parts.join(' · ');
 }
 
-function StepCard({ step, index, count, method, lang, t, disabled, onToggle, onMove, onRemove, onOptions }) {
+function StepCard({ step, index, count, method, lang, t, disabled, onToggle, onMove, onRemove, onOptions, onFormats }) {
   const [open, setOpen] = React.useState(false);
+  const [editing, setEditing] = React.useState(false);
+  const customFormats = Object.keys(formatOverridesOf(method, step.formats)).length > 0;
   const missing = method === undefined;
   const name = missing ? step.method : (method.name?.[lang] ?? method.id);
   const options = step.options ?? {};
@@ -86,7 +88,8 @@ function StepCard({ step, index, count, method, lang, t, disabled, onToggle, onM
         h('div', { className: 'cm-row' },
           h('span', { className: 'cm-name' }, name),
           method && !method.builtin ? h('span', { className: 'cm-badge' }, t('extension')) : null,
-          missing ? h('span', { className: 'cm-badge warn' }, t('missingMethod')) : h('span', { className: 'cm-badge' }, recall ? t('recallYes') : t('recallNo'))),
+          missing ? h('span', { className: 'cm-badge warn' }, t('missingMethod')) : h('span', { className: 'cm-badge' }, recall ? t('recallYes') : t('recallNo')),
+          customFormats ? h('span', { className: 'cm-badge brand' }, t('formatCustom')) : null),
         tag ? h('div', { className: 'cm-sum cm-mono' }, tag) : null,
         method ? h('div', { className: 'cm-sum' }, method.summary?.[lang]) : null),
       h('button', { type: 'button', className: 'cm-btn ghost', title: t('moveUp'), 'aria-label': t('moveUp'), disabled: disabled || index === 0, onClick: () => onMove(-1) }, '↑'),
@@ -96,6 +99,10 @@ function StepCard({ step, index, count, method, lang, t, disabled, onToggle, onM
       h('button', { type: 'button', role: 'switch', 'aria-checked': step.enabled, 'aria-label': `${t('enabled')}: ${name}`, className: 'cm-switch', disabled: disabled || missing, onClick: onToggle })),
     open && method ? h('div', { className: 'cm-body' },
       h('p', { className: 'cm-details' }, method.details?.[lang]),
+      (method.formats ?? []).length > 0 ? h('div', { className: 'cm-row' },
+        h('button', { type: 'button', className: 'cm-btn', disabled, onClick: () => setEditing(true) }, t('formatButton')),
+        h('span', { className: 'cm-sum' }, customFormats ? t('formatCustomHint') : t('formatDefaultHint')),
+        customFormats ? h('button', { type: 'button', className: 'cm-btn ghost', disabled, onClick: () => onFormats({}) }, t('formatResetAll')) : null) : null,
       method.options.length > 0 ? h('div', { className: 'cm-fields' },
         method.options.map(option => h(StepOptionField, {
           key: option.key, option, lang, t, disabled,
@@ -107,7 +114,8 @@ function StepCard({ step, index, count, method, lang, t, disabled, onToggle, onM
             onOptions(next);
           },
         }))) : null,
-      Object.keys(options).length > 0 ? h('div', null, h('button', { type: 'button', className: 'cm-btn', disabled, onClick: () => onOptions({}) }, t('resetOptions'))) : null) : null);
+      Object.keys(options).length > 0 ? h('div', null, h('button', { type: 'button', className: 'cm-btn', disabled, onClick: () => onOptions({}) }, t('resetOptions'))) : null) : null,
+    editing && method ? h(FormatDialog, { method, step, lang, t, onClose: () => setEditing(false), onApply: formats => { onFormats(formats); setEditing(false); } }) : null);
 }
 
 function uniqueStepId(pipeline, base) {
@@ -130,7 +138,10 @@ function sortedJson(value) {
  */
 function stepsShape(steps, methods) {
   const byId = new Map((methods ?? []).map(method => [method.id, method]));
-  return sortedJson(steps.map(step => [step.method, step.enabled !== false, { ...(byId.get(step.method)?.defaults ?? {}), ...(step.options ?? {}) }]));
+  return sortedJson(steps.map(step => {
+    const method = byId.get(step.method);
+    return [step.method, step.enabled !== false, { ...(method?.defaults ?? {}), ...(step.options ?? {}) }, method ? formatOverridesOf(method, step.formats) : (step.formats ?? {})];
+  }));
 }
 
 function downloadJson(data, filename) {
@@ -290,6 +301,7 @@ function PipelineEditor({ pipeline, methods, presets, lang, t, disabled, onChang
       onMove: delta => move(index, delta),
       onRemove: () => onChange(pipeline.filter((_, i) => i !== index)),
       onOptions: options => update(index, { options }),
+      onFormats: formats => update(index, { formats: Object.keys(formats).length > 0 ? formats : undefined }),
     })),
     h(AddStep, { methods, lang, t, disabled, onAdd: id => onChange([...pipeline, { id: uniqueStepId(pipeline, id), method: id, enabled: true, options: {} }]) }),
     h('div', { className: 'cm-step cm-final' },

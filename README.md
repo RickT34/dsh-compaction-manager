@@ -16,6 +16,7 @@ This plugin adds a model-free stage in front of the summary, and you decide exac
 - **No model calls.** Every step runs locally on the session history, so it adds no requests and no cost.
 - **Nothing is lost.** Hidden content stays in the session log. The model sees what each call was for and can restore any part of it by id.
 - **Tool call arguments, too.** Besides outputs, steps can fold whole tool calls, such as a `write` that carried an entire file, down to a summary or just the call's description.
+- **You define the text, too.** Every method's output is a template. A **Format…** button on each step opens an editor with the available variables, a live preview on sample data, and a preview on a real session, so you can decide exactly what the model sees in place of a hidden call.
 - **Presets to start from.** Presets modeled on Magic Compact and OpenCode DCP, plus an aggressive one, fill in the steps for you; edit them afterwards. Save your own step lists as presets, and import or export them as JSON to share.
 - **See it before it happens.** Each session gets a **Compaction** tab showing every change the steps would make, with the text before and after and the estimated tokens saved. **Compact now** applies them.
 - **One place for all compaction settings.** The official summary's threshold, retention, retries and summary model are in the same panel and apply without a restart.
@@ -111,9 +112,44 @@ The file format:
 
 A bare array of presets, or a single preset object, is accepted as well. Imports are limited to 200 KB, 50 presets per file, 50 steps per preset, 60-character names and 400-character descriptions. Step options must satisfy the method's own rules. A preset that uses a method from a plugin you have not installed still imports, with a warning.
 
+## Custom formats
+
+The text a step writes in place of hidden content comes from a template. Each method has its own: one notice template for Omit output, Deduplicate calls and Drop superseded reads, the middle marker for head/tail trim, the folded text for Purge failed calls, and two templates (summary and description only) for Fold tool calls. The defaults produce exactly the text shown above.
+
+![Format dialog](assets/screenshot-format-en.png)
+
+To change one, expand a step and click **Format…**. The dialog shows:
+
+- the template, with its length (up to 4000 characters);
+- the variables this format receives, each with a description; click one to insert it;
+- a preview rendered from sample data, updated as you type;
+- **Preview on a session**, which runs only this step with the edited template on a session you choose and shows up to 3 real results;
+- errors with their line number, and warnings for unknown variables.
+
+**Apply** stores the template in the step draft; **Save** on the page makes it take effect. A step with a custom format is marked **Custom format**, and custom presets and exported files include the step's formats.
+
+Template syntax:
+
+| Syntax | Meaning |
+|---|---|
+| `{{name}}` | Insert a variable. |
+| `{{name\|clip:120}}` | Insert with filters: `clip:N` cuts to N characters, `oneline` joins lines, `oneline:N` joins and cuts, `lines:N` keeps the first N lines, `trim` removes surrounding whitespace. Filters can be chained. |
+| `{{#name}}…{{/name}}` | Repeat for each item of a list (such as `calls`), or show once when the variable has a value. |
+| `{{^name}}…{{/name}}` | Show only when the variable is empty, false, 0 or an empty list. |
+| `{{! comment }}` | Not written. |
+
+Templates cannot run code. Two safeguards apply to custom formats as they do to the defaults: a step never makes content larger, so a template that would grow a result is skipped, and the preview skips it too. For notice templates, the plugin recognizes results it already compacted by the fixed text at the start of the template, so the editor warns when a notice template does not start with at least 3 fixed characters. For example, a fold summary that keeps the first three lines of every result instead of a one-line head:
+
+```text
+[compacted tool calls · id={{id}} · {{count}} call(s)]
+{{#calls}}• {{tool}}({{args}}) → {{status}}, {{size}} chars{{#description}} · {{description}}{{/description}}
+{{result|lines:3|clip:300}}
+{{/calls}}Call restore_context with id "{{id}}" to view the original.
+```
+
 ## Panel settings
 
-- **Compaction steps and order**: presets, custom presets, and the step list. You can add, remove, reorder, enable and configure steps. **Save** applies the steps at the next compaction; no restart is needed.
+- **Compaction steps and order**: presets, custom presets, and the step list. You can add, remove, reorder, enable and configure steps, and edit each step's output format. **Save** applies the steps at the next compaction; no restart is needed.
 - **Automatic compaction (compaction-basic)**: automatic compaction on or off, `thresholdRatio`, `retainRatio` or `retainTokens`, `headroomTokens`, summary `maxTokens`, summary retries, overflow recoveries, and the summary provider and model. A blank field keeps the official value, and the placeholder shows the value in effect. Turning automatic compaction off also stops overflow recovery; `/compact` still works.
 - **Recall tool restore_context**: *Auto* offers the tool only while an enabled step leaves ids. *Always* and *Never* override that.
 - **Recent runs**: the last 20 pipeline runs, with the number of changes per step and the estimated tokens saved.
@@ -159,10 +195,22 @@ export function apply(ctx) {
     options: [{ key: 'minChars', type: 'number', label: { zh: '最小字符数', en: 'Min chars' }, default: 500 }],
     tagKeys: ['minChars'],          // options shown on the step card
     recall: () => true,             // whether this method leaves restore_context ids
+    formats: [{                     // optional: editable output templates
+      key: 'notice',
+      label: { zh: '提示', en: 'Notice' },
+      default: '[compacted · id={{id}}] {{tool}} output hidden',
+      marker: true,                 // its fixed start identifies compacted results
+      vars: [{ name: 'id', description: { en: 'Recall id' } }, { name: 'tool', description: { en: 'Tool name' } }],
+      sample: { id: 'r123', tool: 'bash' },
+    }],
     plan(view, options) {
       return view.nodes
         .filter(n => n.type === 'tool' && !n.pending && n.chars > options.minChars)
-        .map(n => ({ type: 'result', seq: n.seq, content: [{ type: 'text', text: `[compacted · id=r${n.rootSeq}] …` }] }))
+        .map(n => ({
+          type: 'result',
+          seq: n.seq,
+          content: [{ type: 'text', text: ctx.compactionMethods.render(options.formats.notice, { id: `r${n.rootSeq}`, tool: n.toolName }) }],
+        }))
     },
   }))
 
@@ -176,6 +224,7 @@ export function apply(ctx) {
 ```
 
 - Option types are `number`, `boolean`, `string`, `list` and `select`. The panel builds the form from these declarations.
+- `options.formats` holds the template for each declared format: the step's custom one, or the default. Render it with `ctx.compactionMethods.render(template, vars)`. The format dialog uses `vars` and `sample` for its variable list and preview.
 - `view.nodes` lists the visible messages in order. Each node has `seq`, `rootSeq`, `type` (`user`, `assistant`, `tool`, …), `text`, `chars` and `turn`. Tool nodes also have `toolName`, `args`, `isError` and `pending`.
 - `plan` must not change anything. It returns candidates of two kinds:
   - `{ type: 'result', seq, content }` rewrites one tool result.
@@ -192,7 +241,9 @@ npm run build      # regenerate dist/client.js from src/client/*.js
 
 | Path | Contents |
 |---|---|
-| `src/core.js` | Surface view, candidate simulation, notice text, preview |
+| `src/core.js` | Surface view, candidate simulation, preview |
+| `src/template.js` | Template engine, shared with the browser panel |
+| `src/formats.js` | Default templates, variables and samples of the built-in formats |
 | `src/methods.js` | Built-in methods |
 | `src/presets.js` | Built-in presets and 0.1.x migration |
 | `src/user-presets.js` | Validation, saving and import/export of custom presets |

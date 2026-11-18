@@ -5,6 +5,173 @@ window.__ModuleLoader__.load({
     'use strict';
     const React = require('react');
     const h = React.createElement;
+// ---- template.js (shared with the host)
+// Logic-less templates for compaction text. No imports: the same file is
+// bundled into the browser panel for live previews.
+//
+//   {{name}}                    insert a variable
+//   {{name|clip:80|oneline}}    insert with filters
+//   {{#name}}…{{/name}}         repeat for each list item, or show once when the value is set
+//   {{^name}}…{{/name}}         show when the value is empty, false, 0, or an empty list
+//   {{! comment }}              ignored
+//
+// Templates cannot run code; variables are looked up as own properties only.
+
+const TEMPLATE_MAX = 4000;
+const OUTPUT_MAX = 200_000;
+const MAX_DEPTH = 8;
+const NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+class TemplateError extends Error {
+  constructor(code, detail, message) {
+    super(message);
+    this.name = 'TemplateError';
+    this.code = code;
+    this.detail = detail;
+  }
+}
+
+function lineOf(source, offset) {
+  let line = 1;
+  for (let i = 0; i < offset && i < source.length; i += 1) if (source[i] === '\n') line += 1;
+  return line;
+}
+
+function clipPoints(text, max) {
+  const points = Array.from(text);
+  return points.length <= max ? text : `${points.slice(0, max).join('')}…`;
+}
+
+const FILTERS = {
+  clip: { arg: true, apply: (text, n) => clipPoints(text, n) },
+  oneline: { arg: 'optional', apply: (text, n) => { const flat = text.replace(/\s+/g, ' ').trim(); return n === undefined ? flat : clipPoints(flat, n); } },
+  lines: { arg: true, apply: (text, n) => { const all = text.split('\n'); return all.length <= n ? text : `${all.slice(0, n).join('\n')}\n…`; } },
+  trim: { arg: false, apply: text => text.trim() },
+};
+const FILTER_NAMES = Object.keys(FILTERS);
+
+function parseFilter(raw, source, offset) {
+  const [name, arg, extra] = raw.split(':').map(part => part.trim());
+  const filter = Object.hasOwn(FILTERS, name) ? FILTERS[name] : undefined;
+  const line = lineOf(source, offset);
+  if (filter === undefined || extra !== undefined) throw new TemplateError('bad-filter', { filter: raw, line }, `unknown filter "${raw}" on line ${line}`);
+  if (arg === undefined || arg === '') {
+    if (filter.arg === true) throw new TemplateError('filter-arg', { filter: name, line }, `filter "${name}" needs a number, such as ${name}:80 (line ${line})`);
+    return { name };
+  }
+  if (filter.arg === false || !/^\d{1,6}$/.test(arg)) throw new TemplateError('filter-arg', { filter: name, line }, `filter "${name}" takes a whole number (line ${line})`);
+  return { name, arg: Number(arg) };
+}
+
+/** Parse a template; throws TemplateError with a code, details and line number. */
+function parseTemplate(source) {
+  if (typeof source !== 'string') throw new TemplateError('not-text', {}, 'a template must be text');
+  if (Array.from(source).length > TEMPLATE_MAX) throw new TemplateError('too-long', { max: TEMPLATE_MAX }, `a template may have at most ${TEMPLATE_MAX} characters`);
+  const root = { type: 'root', children: [] };
+  const stack = [root];
+  let i = 0;
+  while (i < source.length) {
+    const open = source.indexOf('{{', i);
+    if (open < 0) { stack[stack.length - 1].children.push({ type: 'text', text: source.slice(i) }); break; }
+    if (open > i) stack[stack.length - 1].children.push({ type: 'text', text: source.slice(i, open) });
+    const close = source.indexOf('}}', open + 2);
+    const line = lineOf(source, open);
+    if (close < 0) throw new TemplateError('unclosed-tag', { line }, `"{{" on line ${line} is not closed with "}}"`);
+    const raw = source.slice(open + 2, close).trim();
+    i = close + 2;
+    if (raw.startsWith('!')) continue;
+    const sigil = raw[0];
+    if (sigil === '#' || sigil === '^' || sigil === '/') {
+      const name = raw.slice(1).trim();
+      if (!NAME.test(name)) throw new TemplateError('bad-name', { name, line }, `"${name}" on line ${line} is not a valid variable name`);
+      if (sigil === '/') {
+        const top = stack[stack.length - 1];
+        if (top === root) throw new TemplateError('stray-close', { name, line }, `"{{/${name}}}" on line ${line} has no matching opening tag`);
+        if (top.name !== name) throw new TemplateError('mismatch', { name, expected: top.name, line }, `"{{/${name}}}" on line ${line} should close "${top.name}"`);
+        stack.pop();
+        continue;
+      }
+      if (stack.length > MAX_DEPTH) throw new TemplateError('too-deep', { max: MAX_DEPTH, line }, `sections may nest at most ${MAX_DEPTH} levels`);
+      const node = { type: sigil === '#' ? 'section' : 'inverted', name, line, children: [] };
+      stack[stack.length - 1].children.push(node);
+      stack.push(node);
+      continue;
+    }
+    const [name, ...filters] = raw.split('|').map(part => part.trim());
+    if (!NAME.test(name ?? '')) throw new TemplateError('bad-name', { name: name ?? '', line }, `"${name ?? ''}" on line ${line} is not a valid variable name`);
+    stack[stack.length - 1].children.push({ type: 'var', name, filters: filters.map(filter => parseFilter(filter, source, open)) });
+  }
+  if (stack.length > 1) {
+    const open = stack[stack.length - 1];
+    throw new TemplateError('unclosed-section', { name: open.name, line: open.line }, `"{{#${open.name}}}" on line ${open.line} is never closed`);
+  }
+  return root;
+}
+
+function lookup(scopes, name) {
+  for (let i = scopes.length - 1; i >= 0; i -= 1) {
+    const scope = scopes[i];
+    if (scope && typeof scope === 'object' && !Array.isArray(scope) && Object.hasOwn(scope, name)) return scope[name];
+  }
+  return undefined;
+}
+
+function truthy(value) {
+  if (Array.isArray(value)) return value.length > 0;
+  return value !== undefined && value !== null && value !== false && value !== 0 && value !== '';
+}
+
+/** Render a template (text or parsed tree) with plain-data variables. */
+function renderTemplate(template, vars) {
+  const tree = typeof template === 'string' ? parseTemplate(template) : template;
+  let out = '';
+  const emit = text => {
+    out += text;
+    if (out.length > OUTPUT_MAX) throw new TemplateError('output-too-long', { max: OUTPUT_MAX }, `the rendered text is longer than ${OUTPUT_MAX} characters`);
+  };
+  const walk = (nodes, scopes) => {
+    for (const node of nodes) {
+      if (node.type === 'text') emit(node.text);
+      else if (node.type === 'var') {
+        const value = lookup(scopes, node.name);
+        if (value === undefined || value === null || typeof value === 'object') continue;
+        let text = String(value);
+        for (const filter of node.filters) text = FILTERS[filter.name].apply(text, filter.arg);
+        emit(text);
+      } else if (node.type === 'section') {
+        const value = lookup(scopes, node.name);
+        if (Array.isArray(value)) for (const item of value) walk(node.children, [...scopes, item]);
+        else if (truthy(value)) walk(node.children, value && typeof value === 'object' ? [...scopes, value] : scopes);
+      } else if (node.type === 'inverted') {
+        if (!truthy(lookup(scopes, node.name))) walk(node.children, scopes);
+      }
+    }
+  };
+  walk(tree.children, [vars ?? {}]);
+  return out;
+}
+
+/** Variable names a template uses, for warning about unknown ones. */
+function templateNames(template) {
+  const tree = typeof template === 'string' ? parseTemplate(template) : template;
+  const names = new Set();
+  const walk = nodes => {
+    for (const node of nodes) {
+      if (node.type === 'var' || node.type === 'section' || node.type === 'inverted') names.add(node.name);
+      if (node.children) walk(node.children);
+    }
+  };
+  walk(tree.children);
+  return names;
+}
+
+/** Literal text before the first tag; identifies text this template produced. */
+function staticPrefix(template) {
+  if (typeof template !== 'string') return '';
+  const open = template.indexOf('{{');
+  return open < 0 ? template : template.slice(0, open);
+}
+
 // ---- i18n.js
 // Client dictionaries (namespace compactionManager). Built into dist/client.js.
 const NS = 'compactionManager';
@@ -43,6 +210,42 @@ const zh = {
   noSteps: '没有步骤：压缩触发时直接交给 compaction-basic 做 LLM 摘要。',
   addStep: '添加步骤',
   removeStep: '删除步骤',
+  formatButton: '格式设定',
+  formatTitle: '格式设定：{name}',
+  formatHint: '设置这个步骤压缩后写入上下文的文字。左边编辑模板，右边实时预览。',
+  formatCustom: '自定义格式',
+  formatCustomHint: '这个步骤使用自定义格式。',
+  formatDefaultHint: '这个步骤使用默认格式。',
+  formatResetAll: '恢复默认格式',
+  formatEditor: '模板',
+  formatLength: '{n} / {max} 字符',
+  formatVars: '可用变量（点击插入）',
+  formatItemVars: '列表中每一项的变量（写在 {{#calls}} 和 {{/calls}} 之间）',
+  formatSyntaxTitle: '模板语法',
+  formatSyntax: '{{变量}} 插入变量的值。\n{{#变量}}…{{/变量}}：变量是列表时，对每一项重复中间的内容；是其他有值的变量时，显示一次中间的内容。\n{{^变量}}…{{/变量}}：变量为空、false、0 或空列表时才显示。\n过滤器写在变量后面，可以连用：|clip:N 截断到 N 个字符；|oneline 合并成一行；|oneline:N 合并成一行并截断；|lines:N 只保留前 N 行；|trim 去掉首尾空白。\n{{! 注释 }} 不会输出。模板不能执行代码。',
+  formatSample: '预览（示例数据）',
+  formatReal: '在会话上预览',
+  formatRealHint: '用这个步骤当前的参数和编辑中的模板处理所选会话，只运行这一个步骤，最多显示 3 处改动。',
+  formatRealRun: '预览',
+  formatRealNone: '所选会话里没有会被这个步骤改动的内容。',
+  formatRealCount: '显示 {shown} / {total} 处改动',
+  formatReset: '恢复默认',
+  formatApply: '应用',
+  formatBlocked: '模板有误，无法应用：{names}',
+  formatInvalid: '模板有误：',
+  formatUnknown: '未知变量 {names}，会显示为空。',
+  formatPrefixWarn: '建议模板以至少 3 个固定字符开头（例如 “[compacted”）。插件靠这段开头识别已经压缩过的内容，否则同一结果可能被再次压缩。',
+  formatDiscard: '放弃对格式的修改？',
+  errUnclosedTag: '第 {line} 行的 “{{” 没有用 “}}” 结束。',
+  errUnclosedSection: '第 {line} 行的 {{#{name}}} 没有对应的 {{/{name}}}。',
+  errMismatch: '第 {line} 行的 {{/{name}}} 应该是 {{/{expected}}}。',
+  errStrayClose: '第 {line} 行的 {{/{name}}} 前面没有对应的 {{#{name}}}。',
+  errBadName: '第 {line} 行的 “{name}” 不是有效的变量名。',
+  errBadFilter: '第 {line} 行的过滤器 “{filter}” 不存在。',
+  errFilterArg: '第 {line} 行的过滤器 {filter} 需要一个整数，例如 {filter}:80。',
+  errTooLong: '模板最多 {max} 个字符。',
+  errTooDeep: '区块最多嵌套 {max} 层。',
+  errOutputTooLong: '生成的文字超过 {max} 个字符。',
   presetUser: '自定义',
   saveAsPreset: '保存为预设',
   importPresets: '导入',
@@ -184,6 +387,42 @@ const en = {
   noSteps: 'No steps: on a compaction trigger, compaction-basic writes its LLM summary directly.',
   addStep: 'Add step',
   removeStep: 'Remove step',
+  formatButton: 'Format…',
+  formatTitle: 'Format: {name}',
+  formatHint: 'Set the text this step writes into the context. Edit the template on the left; the preview on the right updates as you type.',
+  formatCustom: 'Custom format',
+  formatCustomHint: 'This step uses a custom format.',
+  formatDefaultHint: 'This step uses the default format.',
+  formatResetAll: 'Reset format',
+  formatEditor: 'Template',
+  formatLength: '{n} / {max} chars',
+  formatVars: 'Variables (click to insert)',
+  formatItemVars: 'Variables of each list item (use between {{#calls}} and {{/calls}})',
+  formatSyntaxTitle: 'Template syntax',
+  formatSyntax: '{{name}} inserts a variable.\n{{#name}}…{{/name}} repeats the content for each item when the variable is a list, and shows it once when the variable has any other value.\n{{^name}}…{{/name}} shows the content only when the variable is empty, false, 0 or an empty list.\nFilters follow the name and can be chained: |clip:N cuts to N characters; |oneline joins lines; |oneline:N joins and cuts; |lines:N keeps the first N lines; |trim removes surrounding whitespace.\n{{! comment }} is not written. Templates cannot run code.',
+  formatSample: 'Preview (sample data)',
+  formatReal: 'Preview on a session',
+  formatRealHint: 'Runs only this step, with its current options and the edited templates, on the chosen session and shows up to 3 changes.',
+  formatRealRun: 'Preview',
+  formatRealNone: 'This step would change nothing in the chosen session.',
+  formatRealCount: 'Showing {shown} of {total} changes',
+  formatReset: 'Reset to default',
+  formatApply: 'Apply',
+  formatBlocked: 'Fix the template before applying: {names}',
+  formatInvalid: 'Template error: ',
+  formatUnknown: 'Unknown variable {names}; it will be empty.',
+  formatPrefixWarn: 'Start the template with at least 3 fixed characters (such as “[compacted”). The plugin uses that start to recognize text it already compacted; without it the same result may be compacted again.',
+  formatDiscard: 'Discard your format changes?',
+  errUnclosedTag: '“{{” on line {line} is not closed with “}}”.',
+  errUnclosedSection: '{{#{name}}} on line {line} has no matching {{/{name}}}.',
+  errMismatch: '{{/{name}}} on line {line} should be {{/{expected}}}.',
+  errStrayClose: '{{/{name}}} on line {line} has no matching {{#{name}}} before it.',
+  errBadName: '“{name}” on line {line} is not a valid variable name.',
+  errBadFilter: 'Filter “{filter}” on line {line} does not exist.',
+  errFilterArg: 'Filter {filter} on line {line} needs a whole number, such as {filter}:80.',
+  errTooLong: 'A template may have at most {max} characters.',
+  errTooDeep: 'Sections may nest at most {max} levels.',
+  errOutputTooLong: 'The rendered text is longer than {max} characters.',
   presetUser: 'Custom',
   saveAsPreset: 'Save as preset',
   importPresets: 'Import',
@@ -401,6 +640,23 @@ const CSS = `
 .cm-diff pre{margin:2px 0 0;max-height:320px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:11.5px;padding:8px;border-radius:8px;background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l1)}
 .cm-mono{font-family:var(--dsw-font-mono,ui-monospace,monospace)}
 .cm-muted{color:var(--dsw-alias-label-tertiary)}
+.cm-overlay{position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:3vh 2vw}
+.cm-dialog{width:min(1180px,96vw);max-height:94vh;display:flex;flex-direction:column;background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l3);border-radius:14px;box-shadow:0 18px 60px rgba(0,0,0,.45);color:var(--dsw-alias-label-primary);font-size:14px;line-height:1.5}
+.cm-dialog-head,.cm-dialog-foot{display:flex;align-items:center;gap:10px;padding:14px 18px}
+.cm-dialog-head{border-bottom:1px solid var(--dsw-alias-border-l2)}
+.cm-dialog-foot{border-top:1px solid var(--dsw-alias-border-l2)}
+.cm-dialog-body{display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:14px 18px;overflow:auto;min-height:0}
+.cm-dialog-col{display:flex;flex-direction:column;gap:8px;min-width:0}
+.cm-tabs{display:flex;gap:4px;padding:8px 18px 0}
+.cm-tab{font:inherit;font-size:13px;border:1px solid transparent;border-bottom:0;background:transparent;color:var(--dsw-alias-label-secondary);padding:6px 12px;border-radius:8px 8px 0 0;cursor:pointer}
+.cm-tab.active{color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-base)}
+.cm-template{min-height:220px;font-size:12.5px;line-height:1.55;white-space:pre-wrap}
+.cm-output{margin:0;padding:10px;border-radius:8px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-base);white-space:pre-wrap;word-break:break-word;font-family:var(--dsw-font-mono,ui-monospace,monospace);font-size:12px;max-height:260px;overflow:auto;min-height:40px}
+.cm-vars{display:flex;flex-direction:column;gap:2px;max-height:200px;overflow:auto;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;padding:4px}
+.cm-var{font:inherit;font-size:12px;display:flex;gap:10px;align-items:baseline;text-align:left;border:0;background:transparent;color:var(--dsw-alias-label-secondary);padding:3px 6px;border-radius:6px;cursor:pointer}
+.cm-var:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.cm-var code{color:var(--dsw-alias-state-business-primary);white-space:nowrap;min-width:92px}
+@media (max-width:860px){.cm-dialog-body{grid-template-columns:1fr}}
 @media (max-width:720px){.cm-diff{grid-template-columns:1fr}.cm-body{padding-left:14px}}
 `;
 
@@ -478,8 +734,10 @@ function stepTag(method, options, lang, t) {
   return parts.join(' · ');
 }
 
-function StepCard({ step, index, count, method, lang, t, disabled, onToggle, onMove, onRemove, onOptions }) {
+function StepCard({ step, index, count, method, lang, t, disabled, onToggle, onMove, onRemove, onOptions, onFormats }) {
   const [open, setOpen] = React.useState(false);
+  const [editing, setEditing] = React.useState(false);
+  const customFormats = Object.keys(formatOverridesOf(method, step.formats)).length > 0;
   const missing = method === undefined;
   const name = missing ? step.method : (method.name?.[lang] ?? method.id);
   const options = step.options ?? {};
@@ -493,7 +751,8 @@ function StepCard({ step, index, count, method, lang, t, disabled, onToggle, onM
         h('div', { className: 'cm-row' },
           h('span', { className: 'cm-name' }, name),
           method && !method.builtin ? h('span', { className: 'cm-badge' }, t('extension')) : null,
-          missing ? h('span', { className: 'cm-badge warn' }, t('missingMethod')) : h('span', { className: 'cm-badge' }, recall ? t('recallYes') : t('recallNo'))),
+          missing ? h('span', { className: 'cm-badge warn' }, t('missingMethod')) : h('span', { className: 'cm-badge' }, recall ? t('recallYes') : t('recallNo')),
+          customFormats ? h('span', { className: 'cm-badge brand' }, t('formatCustom')) : null),
         tag ? h('div', { className: 'cm-sum cm-mono' }, tag) : null,
         method ? h('div', { className: 'cm-sum' }, method.summary?.[lang]) : null),
       h('button', { type: 'button', className: 'cm-btn ghost', title: t('moveUp'), 'aria-label': t('moveUp'), disabled: disabled || index === 0, onClick: () => onMove(-1) }, '↑'),
@@ -503,6 +762,10 @@ function StepCard({ step, index, count, method, lang, t, disabled, onToggle, onM
       h('button', { type: 'button', role: 'switch', 'aria-checked': step.enabled, 'aria-label': `${t('enabled')}: ${name}`, className: 'cm-switch', disabled: disabled || missing, onClick: onToggle })),
     open && method ? h('div', { className: 'cm-body' },
       h('p', { className: 'cm-details' }, method.details?.[lang]),
+      (method.formats ?? []).length > 0 ? h('div', { className: 'cm-row' },
+        h('button', { type: 'button', className: 'cm-btn', disabled, onClick: () => setEditing(true) }, t('formatButton')),
+        h('span', { className: 'cm-sum' }, customFormats ? t('formatCustomHint') : t('formatDefaultHint')),
+        customFormats ? h('button', { type: 'button', className: 'cm-btn ghost', disabled, onClick: () => onFormats({}) }, t('formatResetAll')) : null) : null,
       method.options.length > 0 ? h('div', { className: 'cm-fields' },
         method.options.map(option => h(StepOptionField, {
           key: option.key, option, lang, t, disabled,
@@ -514,7 +777,8 @@ function StepCard({ step, index, count, method, lang, t, disabled, onToggle, onM
             onOptions(next);
           },
         }))) : null,
-      Object.keys(options).length > 0 ? h('div', null, h('button', { type: 'button', className: 'cm-btn', disabled, onClick: () => onOptions({}) }, t('resetOptions'))) : null) : null);
+      Object.keys(options).length > 0 ? h('div', null, h('button', { type: 'button', className: 'cm-btn', disabled, onClick: () => onOptions({}) }, t('resetOptions'))) : null) : null,
+    editing && method ? h(FormatDialog, { method, step, lang, t, onClose: () => setEditing(false), onApply: formats => { onFormats(formats); setEditing(false); } }) : null);
 }
 
 function uniqueStepId(pipeline, base) {
@@ -537,7 +801,10 @@ function sortedJson(value) {
  */
 function stepsShape(steps, methods) {
   const byId = new Map((methods ?? []).map(method => [method.id, method]));
-  return sortedJson(steps.map(step => [step.method, step.enabled !== false, { ...(byId.get(step.method)?.defaults ?? {}), ...(step.options ?? {}) }]));
+  return sortedJson(steps.map(step => {
+    const method = byId.get(step.method);
+    return [step.method, step.enabled !== false, { ...(method?.defaults ?? {}), ...(step.options ?? {}) }, method ? formatOverridesOf(method, step.formats) : (step.formats ?? {})];
+  }));
 }
 
 function downloadJson(data, filename) {
@@ -697,6 +964,7 @@ function PipelineEditor({ pipeline, methods, presets, lang, t, disabled, onChang
       onMove: delta => move(index, delta),
       onRemove: () => onChange(pipeline.filter((_, i) => i !== index)),
       onOptions: options => update(index, { options }),
+      onFormats: formats => update(index, { formats: Object.keys(formats).length > 0 ? formats : undefined }),
     })),
     h(AddStep, { methods, lang, t, disabled, onAdd: id => onChange([...pipeline, { id: uniqueStepId(pipeline, id), method: id, enabled: true, options: {} }]) }),
     h('div', { className: 'cm-step cm-final' },
@@ -705,6 +973,157 @@ function PipelineEditor({ pipeline, methods, presets, lang, t, disabled, onChang
         h('div', { className: 'cm-grow' },
           h('div', { className: 'cm-name' }, t('finalStep')),
           h('div', { className: 'cm-sum' }, t('finalStepHint'))))));
+}
+
+// ---- format-editor.js
+// Format dialog: edit a step's output templates with live sample and session previews.
+const FORMAT_ERRORS = {
+  'unclosed-tag': 'errUnclosedTag',
+  'unclosed-section': 'errUnclosedSection',
+  mismatch: 'errMismatch',
+  'stray-close': 'errStrayClose',
+  'bad-name': 'errBadName',
+  'bad-filter': 'errBadFilter',
+  'filter-arg': 'errFilterArg',
+  'too-long': 'errTooLong',
+  'too-deep': 'errTooDeep',
+  'output-too-long': 'errOutputTooLong',
+};
+
+function templateErrorText(error, t) {
+  const key = FORMAT_ERRORS[error?.code];
+  return key ? fmt(t(key), error.detail ?? {}) : String(error?.message ?? error);
+}
+
+/** Overrides that differ from a method's default templates. */
+function formatOverridesOf(method, formats) {
+  const out = {};
+  for (const format of method?.formats ?? []) {
+    const value = formats?.[format.key];
+    if (typeof value === 'string' && value !== '' && value !== format.default) out[format.key] = value;
+  }
+  return out;
+}
+
+/** Live analysis of one template against its declared variables. */
+function analyzeTemplate(source, format, t) {
+  try {
+    const tree = parseTemplate(source);
+    const declared = new Set(format.vars.map(item => item.name));
+    const unknown = [...templateNames(tree)].filter(name => !declared.has(name));
+    let output = '';
+    let renderError = '';
+    try { output = renderTemplate(tree, format.sample); } catch (error) { renderError = templateErrorText(error, t); }
+    const warnings = [];
+    if (unknown.length > 0) warnings.push(fmt(t('formatUnknown'), { names: unknown.join(', ') }));
+    if (format.marker && staticPrefix(source).trim().length < 3) warnings.push(t('formatPrefixWarn'));
+    return { ok: renderError === '', error: renderError, output, warnings };
+  } catch (error) {
+    return { ok: false, error: templateErrorText(error, t), output: '', warnings: [] };
+  }
+}
+
+function FormatDialog({ method, step, lang, t, onApply, onClose }) {
+  const formats = method.formats;
+  const initial = () => Object.fromEntries(formats.map(format => [format.key, step.formats?.[format.key] ?? format.default]));
+  const preferred = method.id === 'fold-calls' ? ((step.options?.detail ?? method.defaults?.detail) === 'description' ? 'description' : 'summary') : formats[0].key;
+  const [drafts, setDrafts] = React.useState(initial);
+  const [active, setActive] = React.useState(preferred);
+  const [sessions, setSessions] = React.useState(undefined);
+  const [sessionId, setSessionId] = React.useState('');
+  const [real, setReal] = React.useState(undefined);
+  const [busy, setBusy] = React.useState(false);
+  const area = React.useRef(null);
+  const format = formats.find(item => item.key === active) ?? formats[0];
+  const source = drafts[format.key];
+  const analysis = React.useMemo(() => analyzeTemplate(source, format, t), [source, format, t]);
+  const all = formats.map(item => [item, analyzeTemplate(drafts[item.key], item, t)]);
+  const invalid = all.filter(([, result]) => !result.ok);
+  const dirty = formats.some(item => drafts[item.key] !== (step.formats?.[item.key] ?? item.default));
+
+  const close = () => { if (!dirty || window.confirm(t('formatDiscard'))) onClose(); };
+  React.useEffect(() => {
+    const onKey = event => { if (event.key === 'Escape') { event.stopPropagation(); close(); } };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  });
+  React.useEffect(() => { area.current?.focus(); }, [active]);
+  React.useEffect(() => {
+    callHost('sessions').then(list => { setSessions(list); setSessionId(current => current || list[0]?.id || ''); }, () => setSessions([]));
+  }, []);
+
+  const setSource = value => setDrafts(current => ({ ...current, [format.key]: value }));
+  const insert = text => {
+    const el = area.current;
+    const start = el?.selectionStart ?? source.length;
+    const end = el?.selectionEnd ?? source.length;
+    const next = source.slice(0, start) + text + source.slice(end);
+    setSource(next);
+    requestAnimationFrame(() => { if (el) { el.focus(); el.selectionStart = el.selectionEnd = start + text.length; } });
+  };
+  const runReal = async () => {
+    if (!sessionId) return;
+    setBusy(true);
+    setReal(undefined);
+    try {
+      const preview = await callHost('preview', { sessionId, pipeline: [{ id: step.id, method: step.method, enabled: true, options: step.options ?? {}, formats: formatOverridesOf(method, drafts) }] });
+      const result = preview.steps[0];
+      setReal(result.error ? { error: result.error } : { items: result.items.slice(0, 3), total: result.items.length + (result.more ?? 0) });
+    } catch (error) {
+      setReal({ error: String(error?.message ?? error) });
+    } finally {
+      setBusy(false);
+    }
+  };
+  const label = item => item.label?.[lang] ?? item.key;
+  const topVars = format.vars.filter(item => !item.item);
+  const itemVars = format.vars.filter(item => item.item);
+
+  return h('div', { className: 'cm-overlay', onMouseDown: event => { if (event.target === event.currentTarget) close(); } },
+    h('div', { className: 'cm-dialog', role: 'dialog', 'aria-modal': true, 'aria-label': fmt(t('formatTitle'), { name: method.name?.[lang] ?? method.id }) },
+      h('header', { className: 'cm-dialog-head' },
+        h('div', { className: 'cm-grow' },
+          h('div', { className: 'cm-name' }, fmt(t('formatTitle'), { name: method.name?.[lang] ?? method.id })),
+          h('div', { className: 'cm-sum' }, t('formatHint'))),
+        h('button', { type: 'button', className: 'cm-btn ghost', 'aria-label': t('cancel'), onClick: close }, '✕')),
+      formats.length > 1 ? h('div', { className: 'cm-tabs', role: 'tablist' },
+        formats.map(item => h('button', {
+          key: item.key, type: 'button', role: 'tab', 'aria-selected': item.key === format.key,
+          className: `cm-tab${item.key === format.key ? ' active' : ''}`, onClick: () => setActive(item.key),
+        }, label(item), drafts[item.key] !== item.default ? ' •' : ''))) : null,
+      h('div', { className: 'cm-dialog-body' },
+        h('div', { className: 'cm-dialog-col' },
+          h('div', { className: 'cm-row' },
+            h('span', { className: 'cm-label cm-grow' }, t('formatEditor')),
+            h('span', { className: 'cm-muted cm-sum' }, fmt(t('formatLength'), { n: Array.from(source).length, max: 4000 }))),
+          h('textarea', { ref: area, className: 'cm-textarea cm-template', spellCheck: false, value: source, onChange: event => setSource(event.target.value), 'aria-label': t('formatEditor') }),
+          analysis.ok ? null : h('div', { className: 'cm-msg err' }, t('formatInvalid') + analysis.error),
+          analysis.warnings.map((text, index) => h('div', { key: index, className: 'cm-sum cm-warn' }, text)),
+          h('div', { className: 'cm-label' }, t('formatVars')),
+          h('div', { className: 'cm-vars' }, topVars.map(item => h('button', { key: item.name, type: 'button', className: 'cm-var', title: item.description?.[lang], onClick: () => insert(`{{${item.name}}}`) },
+            h('code', null, item.name), h('span', null, item.description?.[lang])))),
+          itemVars.length > 0 ? h('div', { className: 'cm-label', style: { textTransform: 'none' } }, t('formatItemVars')) : null,
+          itemVars.length > 0 ? h('div', { className: 'cm-vars' }, itemVars.map(item => h('button', { key: item.name, type: 'button', className: 'cm-var', title: item.description?.[lang], onClick: () => insert(`{{${item.name}}}`) },
+            h('code', null, `· ${item.name}`), h('span', null, item.description?.[lang])))) : null,
+          h('details', { className: 'cm-sum' }, h('summary', null, t('formatSyntaxTitle')), h('p', { className: 'cm-details', style: { marginTop: 6 } }, t('formatSyntax')))),
+        h('div', { className: 'cm-dialog-col' },
+          h('div', { className: 'cm-label' }, t('formatSample')),
+          h('pre', { className: 'cm-output' }, analysis.ok ? analysis.output : ''),
+          h('div', { className: 'cm-label' }, t('formatReal')),
+          h('div', { className: 'cm-sum' }, t('formatRealHint')),
+          h('div', { className: 'cm-row' },
+            h('select', { className: 'cm-select cm-grow', 'aria-label': t('pickSession'), value: sessionId, onChange: event => { setSessionId(event.target.value); setReal(undefined); } },
+              sessions === undefined ? h('option', { value: '' }, t('loading')) : sessions.map(item => h('option', { key: item.id, value: item.id }, item.title || item.id))),
+            h('button', { type: 'button', className: 'cm-btn', disabled: busy || !sessionId || invalid.length > 0, onClick: runReal }, busy ? t('previewing') : t('formatRealRun'))),
+          real?.error ? h('div', { className: 'cm-msg err' }, real.error) : null,
+          real && !real.error && real.items.length === 0 ? h('div', { className: 'cm-sum' }, t('formatRealNone')) : null,
+          real && !real.error && real.items.length > 0 ? h('div', { className: 'cm-sum cm-muted' }, fmt(t('formatRealCount'), { shown: real.items.length, total: real.total })) : null,
+          real && !real.error ? real.items.map((item, index) => h('pre', { key: index, className: 'cm-output' }, item.after.replace(/^(user|tool): /, ''))) : null)),
+      h('footer', { className: 'cm-dialog-foot' },
+        h('button', { type: 'button', className: 'cm-btn', disabled: source === format.default, onClick: () => setSource(format.default) }, t('formatReset')),
+        invalid.length > 0 ? h('span', { className: 'cm-msg err cm-grow' }, fmt(t('formatBlocked'), { names: invalid.map(([item]) => label(item)).join(', ') })) : h('span', { className: 'cm-grow' }),
+        h('button', { type: 'button', className: 'cm-btn', onClick: close }, t('cancel')),
+        h('button', { type: 'button', className: 'cm-btn primary', disabled: invalid.length > 0, onClick: () => onApply(formatOverridesOf(method, drafts)) }, t('formatApply')))));
 }
 
 // ---- forms.js

@@ -1,6 +1,9 @@
 // Method and preset registry: built-ins plus contributions from other plugins
 // through the `compactionMethods` service.
 import { resolveOptions } from './core.js';
+import { cleanFormats } from './format-runtime.js';
+import { describeFormats } from './formats.js';
+import { parseTemplate } from './template.js';
 import { BUILTIN_METHODS } from './methods.js';
 import { BUILTIN_PRESETS, DEFAULT_PIPELINE, migrateLegacyStep } from './presets.js';
 
@@ -24,6 +27,14 @@ function validateMethod(method) {
   if (method.options !== undefined && !Array.isArray(method.options)) throw new TypeError(`compaction method "${method.id}" options must be an array`);
   for (const option of method.options ?? []) {
     if (typeof option?.key !== 'string' || !OPTION_TYPES.includes(option.type)) throw new TypeError(`compaction method "${method.id}" has an invalid option declaration`);
+  }
+  if (method.formats !== undefined && !Array.isArray(method.formats)) throw new TypeError(`compaction method "${method.id}" formats must be an array`);
+  const keys = new Set();
+  for (const format of method.formats ?? []) {
+    if (typeof format?.key !== 'string' || !/^[A-Za-z][A-Za-z0-9_-]{0,31}$/.test(format.key) || keys.has(format.key)) throw new TypeError(`compaction method "${method.id}" has an invalid or repeated format key`);
+    keys.add(format.key);
+    if (typeof format.default !== 'string') throw new TypeError(`compaction method "${method.id}" format "${format.key}" needs a default template`);
+    parseTemplate(format.default);
   }
 }
 
@@ -109,6 +120,11 @@ export class MethodRegistry {
           choices: option.choices?.map(choice => ({ value: choice.value, label: localized(choice.label, String(choice.value)) })),
         })),
         tagKeys: Array.isArray(method.tagKeys) ? method.tagKeys.filter(key => typeof key === 'string') : [],
+        formats: describeFormats(method).map(format => ({
+          ...format,
+          label: localized(format.label, format.key),
+          vars: format.vars.map(item => ({ ...item, description: localized(item.description) })),
+        })),
         defaults,
         recall: typeof method.recall === 'function' ? Boolean(safeRecall(method, defaults)) : false,
       };
@@ -148,7 +164,8 @@ export function normalizePipeline(raw, fallback = DEFAULT_PIPELINE) {
     if (!item || typeof item.method !== 'string') continue;
     const migrated = migrateLegacyStep(item);
     if (migrated !== undefined) { legacy = true; steps.push(...migrated); continue; }
-    steps.push({ id: typeof item.id === 'string' ? item.id : undefined, method: item.method, enabled: item.enabled !== false, options: plainOptions(item.options) });
+    const formats = cleanFormats(item.formats);
+    steps.push({ id: typeof item.id === 'string' ? item.id : undefined, method: item.method, enabled: item.enabled !== false, options: plainOptions(item.options), ...(Object.keys(formats).length > 0 ? { formats } : {}) });
   }
   // A legacy pipeline with nothing enabled was the untouched 0.1.x default.
   if (legacy && steps.length === 0) return normalizePipeline(fallback, []);

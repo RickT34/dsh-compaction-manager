@@ -16,6 +16,7 @@
 - **不调用模型。** 所有步骤都在本地处理会话历史，不增加请求，也不产生费用。
 - **不丢信息。** 被隐藏的内容仍在会话日志里。模型能看到每个调用是做什么的，需要时按 ID 取回任何一部分。
 - **连工具调用参数一起压缩。** 除了输出，步骤还能把整个工具调用折叠成摘要，或者只留下调用的 description，比如一次带着整个文件内容的 `write`。
+- **文字格式也由你定义。** 每种方法写入的文字都来自一个模板。每个步骤都有「格式设定」按钮，打开的编辑器里列出可用变量，有基于示例数据的实时预览，也能在真实会话上预览，你可以精确决定模型在被隐藏的调用处看到什么。
 - **有现成的预设可以起步。** 内置仿 Magic Compact、仿 OpenCode DCP 和「激进」三个预设，一键填好步骤，之后可以继续改。自己排的步骤可以存成预设，也能导出成 JSON 分享或导入别人的。
 - **先看效果再动手。** 每个会话多了一个「压缩」标签，列出步骤会做的每一处改动，可以对比改动前后的文字，并估算能省多少 token。点「立即压缩」就会执行。
 - **压缩设置集中在一处。** 官方摘要的触发阈值、保留比例、重试次数和摘要模型也在同一个面板里，改完不用重启。
@@ -111,9 +112,44 @@ Magic Compact 和 OpenCode DCP 都不是完整移植：原项目中调用模型�
 
 也接受预设数组，或单个预设对象。导入的限制：文件不超过 200 KB，每个文件最多 50 个预设，每个预设最多 50 个步骤，名称最长 60 字，说明最长 400 字。步骤参数必须符合对应方法的规则。用到了没安装的插件提供的方法时，预设仍会导入，但会给出提示。
 
+## 自定义格式
+
+步骤在被隐藏内容的位置写入的文字来自模板，每种方法有自己的模板：「省略输出」「重复调用去重」「清理被覆盖的读取」各有一个省略提示模板，「首尾裁剪」有中间标记模板，「清理出错调用」有折叠文字模板，「折叠工具调用」有摘要和仅 description 两个模板。默认模板生成的文字和前面介绍的完全一致。
+
+![格式设定窗口](assets/screenshot-format-zh.png)
+
+要修改，展开一个步骤，点**格式设定**。弹出的窗口里有：
+
+- 模板本身和它的长度（最多 4000 字符）；
+- 这个格式能用的变量和说明，点击即可插入；
+- 基于示例数据的预览，随输入实时更新；
+- **在会话上预览**：在你选的会话上只运行这一个步骤，用编辑中的模板处理，最多显示 3 处真实结果；
+- 带行号的错误提示，以及未知变量的警告。
+
+点**应用**会把模板写进步骤草稿，再在页面上点**保存**才会生效。用了自定义格式的步骤会标出**自定义格式**，自定义预设和导出的文件也会带上步骤的格式。
+
+模板语法：
+
+| 写法 | 含义 |
+|---|---|
+| `{{变量}}` | 插入变量的值。 |
+| `{{变量\|clip:120}}` | 加过滤器后插入：`clip:N` 截断到 N 个字符，`oneline` 合并成一行，`oneline:N` 合并成一行并截断，`lines:N` 只保留前 N 行，`trim` 去掉首尾空白。过滤器可以连用。 |
+| `{{#变量}}…{{/变量}}` | 变量是列表（例如 `calls`）时对每一项重复中间的内容；是其他有值的变量时显示一次。 |
+| `{{^变量}}…{{/变量}}` | 变量为空、false、0 或空列表时才显示。 |
+| `{{! 注释 }}` | 不会输出。 |
+
+模板不能执行代码。自定义格式和默认格式一样受两条保护：步骤不会让内容变大，会让结果变长的模板会被跳过，预览里也会跳过；对省略提示模板，插件靠模板开头的固定文字识别已经压缩过的结果，所以开头不足 3 个固定字符时编辑器会提醒。例如，下面这个折叠摘要会保留每个结果的前三行，而不是只留一行开头：
+
+```text
+[compacted tool calls · id={{id}} · {{count}} call(s)]
+{{#calls}}• {{tool}}({{args}}) → {{status}}, {{size}} chars{{#description}} · {{description}}{{/description}}
+{{result|lines:3|clip:300}}
+{{/calls}}Call restore_context with id "{{id}}" to view the original.
+```
+
 ## 面板设置
 
-- **压缩步骤与顺序**：内置预设、自定义预设和步骤列表。步骤可以添加、删除、排序、启用和调整参数。点**保存**后在下一次压缩时生效，不用重启。
+- **压缩步骤与顺序**：内置预设、自定义预设和步骤列表。步骤可以添加、删除、排序、启用、调整参数，也可以编辑输出格式。点**保存**后在下一次压缩时生效，不用重启。
 - **自动压缩参数（compaction-basic）**：自动压缩开关、`thresholdRatio`、`retainRatio` 或 `retainTokens`、`headroomTokens`、摘要的 `maxTokens`、摘要重试次数、溢出恢复次数，以及摘要模型的提供方和模型。留空表示使用官方值，占位文字显示当前生效的值。关闭自动压缩也会停用溢出恢复，手动 `/compact` 仍然可用。
 - **取回工具 restore_context**：*自动*表示只有启用的步骤会留下 ID 时才提供这个工具；*总是提供*和*从不提供*会覆盖这个判断。
 - **最近执行**：最近 20 次执行，显示每个步骤改了几处，以及估算节省的 token。
@@ -159,10 +195,22 @@ export function apply(ctx) {
     options: [{ key: 'minChars', type: 'number', label: { zh: '最小字符数', en: 'Min chars' }, default: 500 }],
     tagKeys: ['minChars'],          // 显示在步骤卡片上的参数
     recall: () => true,             // 这个方法是否会留下 restore_context 的 ID
+    formats: [{                     // 可选：可编辑的输出模板
+      key: 'notice',
+      label: { zh: '提示', en: 'Notice' },
+      default: '[compacted · id={{id}}] {{tool}} output hidden',
+      marker: true,                 // 模板开头的固定文字用来识别已压缩的结果
+      vars: [{ name: 'id', description: { zh: '取回 ID' } }, { name: 'tool', description: { zh: '工具名' } }],
+      sample: { id: 'r123', tool: 'bash' },
+    }],
     plan(view, options) {
       return view.nodes
         .filter(n => n.type === 'tool' && !n.pending && n.chars > options.minChars)
-        .map(n => ({ type: 'result', seq: n.seq, content: [{ type: 'text', text: `[compacted · id=r${n.rootSeq}] …` }] }))
+        .map(n => ({
+          type: 'result',
+          seq: n.seq,
+          content: [{ type: 'text', text: ctx.compactionMethods.render(options.formats.notice, { id: `r${n.rootSeq}`, tool: n.toolName }) }],
+        }))
     },
   }))
 
@@ -176,6 +224,7 @@ export function apply(ctx) {
 ```
 
 - 参数类型有 `number`、`boolean`、`string`、`list`、`select`，面板会按这些声明生成表单。
+- `options.formats` 是每个已声明格式的模板：步骤有自定义的就用自定义的，否则用默认的。用 `ctx.compactionMethods.render(template, vars)` 渲染。格式窗口用 `vars` 和 `sample` 生成变量列表和预览。
 - `view.nodes` 按顺序列出模型可见的消息。每个节点有 `seq`、`rootSeq`、`type`（`user`、`assistant`、`tool` 等）、`text`、`chars`、`turn`；工具结果节点另有 `toolName`、`args`、`isError`、`pending`。
 - `plan` 不能修改任何东西，它返回两种候选项：
   - `{ type: 'result', seq, content }`：改写一条工具结果。
@@ -192,7 +241,9 @@ npm run build      # 用 src/client/*.js 重新生成 dist/client.js
 
 | 路径 | 内容 |
 |---|---|
-| `src/core.js` | 可见消息视图、候选项模拟、提示文字、预览 |
+| `src/core.js` | 可见消息视图、候选项模拟、预览 |
+| `src/template.js` | 模板引擎，和浏览器端面板共用 |
+| `src/formats.js` | 内置格式的默认模板、变量和示例数据 |
 | `src/methods.js` | 内置方法 |
 | `src/presets.js` | 内置预设和 0.1.x 配置迁移 |
 | `src/user-presets.js` | 自定义预设的校验、保存和导入导出 |

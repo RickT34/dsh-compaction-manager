@@ -2,6 +2,8 @@
 // "compact now", and previews.
 import { buildView, normalizeCandidates, resolveOptions, previewPipeline } from './core.js';
 import { applyCandidate, liveAccessor, surfaceEntries } from './session-view.js';
+import { compactedMarkers } from './formats.js';
+import { cleanFormats } from './format-runtime.js';
 import { normalizePipeline } from './registry.js';
 
 const TRIM = 'trim-head-tail';
@@ -31,7 +33,8 @@ export function isPlainOfficial(options, prunerConfig) {
 /** Whether a stored pipeline is exactly the untouched default (official trim alone). */
 export function isDefaultPipeline(rawPipeline) {
   const steps = normalizePipeline(rawPipeline).filter(step => step.enabled);
-  return steps.length === 1 && steps[0].method === TRIM && Object.keys(steps[0].options).length === 0;
+  return steps.length === 1 && steps[0].method === TRIM && Object.keys(steps[0].options).length === 0
+    && Object.keys(cleanFormats(steps[0].formats)).length === 0;
 }
 
 /** Head/tail options fall back to the agent preset's own pruner configuration. */
@@ -54,7 +57,7 @@ export function recallActive(rawPipeline, registry, mode) {
   for (const step of enabledSteps(rawPipeline, registry)) {
     const method = registry.get(step.method);
     try {
-      const options = resolveOptions(method, step.options);
+      const options = resolveOptions(method, step.options, step.formats);
       if (typeof method.recall === 'function' && method.recall(options)) return true;
     } catch { /* invalid steps are skipped at run time too */ }
   }
@@ -70,16 +73,18 @@ export function recallActive(rawPipeline, registry, mode) {
 export function runPipeline(context) {
   const { session, meter, registry, logger } = context;
   const steps = enabledSteps(context.pipeline, registry);
+  const markers = compactedMarkers(steps, registry);
   const report = { pruned: [], charsRemoved: 0, tokensSaved: 0, steps: [] };
   for (const step of steps) {
     const method = registry.get(step.method);
     let options;
-    try { options = resolveOptions(method, withPrunerDefaults(step, context.prunerConfig).options); } catch (error) {
+    try { options = resolveOptions(method, withPrunerDefaults(step, context.prunerConfig).options, step.formats); } catch (error) {
       logger?.warn?.(`compaction-manager: skipping ${step.id}: ${error.message}`);
       report.steps.push({ id: step.id, method: method.id, applied: 0, tokensSaved: 0, error: error.message });
       continue;
     }
-    if (method.id === TRIM && typeof context.runOfficial === 'function' && isPlainOfficial(options, context.prunerConfig)) {
+    if (method.id === TRIM && typeof context.runOfficial === 'function' && isPlainOfficial(options, context.prunerConfig)
+      && Object.keys(cleanFormats(step.formats)).length === 0) {
       // Untouched official settings: delegate to the original implementation.
       const result = context.runOfficial(session);
       report.pruned.push(...(result?.pruned ?? []));
@@ -90,7 +95,7 @@ export function runPipeline(context) {
     let applied = 0;
     let saved = 0;
     try {
-      const view = buildView(surfaceEntries(liveAccessor(session)));
+      const view = buildView(surfaceEntries(liveAccessor(session)), { markers });
       const candidates = normalizeCandidates(view, method.plan(view, options) ?? []);
       for (const candidate of candidates) {
         const delta = applyCandidate(session, meter, candidate);
@@ -112,5 +117,6 @@ export function runPipeline(context) {
 /** Preview the pipeline over detached entries; nothing is written. */
 export function previewSession(entries, rawPipeline, registry, estimate, prunerConfig) {
   const steps = normalizePipeline(rawPipeline).map(step => withPrunerDefaults(step, prunerConfig));
-  return previewPipeline(entries, steps, registry.methods, estimate);
+  const markers = compactedMarkers(steps.filter(step => step.enabled), registry);
+  return previewPipeline(entries, steps, registry.methods, estimate, markers);
 }

@@ -1,6 +1,8 @@
 // User presets: validation of untrusted preset data (panel saves and imported
 // files), stable ids, and merging into the stored list.
 import { resolveOptions } from './core.js';
+import { cleanFormats, formatOverrides } from './format-runtime.js';
+import { TEMPLATE_MAX } from './template.js';
 import { ID, normalizePipeline } from './registry.js';
 
 export const PRESET_FILE_FORMAT = 'dsh-compaction-manager.presets';
@@ -57,7 +59,12 @@ export function cleanPreset(raw, registry) {
     if (typeof step.method !== 'string' || !ID.test(step.method)) throw new Error(`step ${index + 1} has an invalid method id`);
     const options = step.options === undefined ? {} : cleanJson(step.options);
     if (!options || typeof options !== 'object' || Array.isArray(options)) throw new Error(`step ${index + 1} options must be an object`);
-    return { id: typeof step.id === 'string' ? step.id : undefined, method: step.method, enabled: step.enabled !== false, options };
+    if (step.formats !== undefined && (!step.formats || typeof step.formats !== 'object' || Array.isArray(step.formats))) throw new Error(`step ${index + 1} formats must be an object`);
+    for (const [key, value] of Object.entries(step.formats ?? {})) {
+      if (typeof value !== 'string') throw new Error(`step ${index + 1} format "${key}" must be text`);
+      if (Array.from(value).length > TEMPLATE_MAX) throw new Error(`step ${index + 1} format "${key}" is longer than ${TEMPLATE_MAX} characters`);
+    }
+    return { id: typeof step.id === 'string' ? step.id : undefined, method: step.method, enabled: step.enabled !== false, options, formats: cleanFormats(step.formats) };
   });
   const steps = normalizePipeline(input, []);
   if (steps.length === 0) throw new Error('the preset has no usable steps');
@@ -65,9 +72,14 @@ export function cleanPreset(raw, registry) {
   for (const step of steps) {
     const method = registry.get(step.method);
     if (method === undefined) { warnings.push(`method "${step.method}" is not installed`); continue; }
-    try { resolveOptions(method, step.options); } catch (error) {
+    const declared = new Set((method.formats ?? []).map(format => format.key));
+    for (const key of Object.keys(step.formats ?? {})) if (!declared.has(key)) warnings.push(`step "${step.id}": format "${key}" is not used by ${step.method}`);
+    try { resolveOptions(method, step.options, step.formats); } catch (error) {
       throw new Error(`step "${step.id}": ${error.message}`);
     }
+    const overrides = formatOverrides(method, step.formats);
+    if (Object.keys(overrides).length > 0) step.formats = overrides;
+    else delete step.formats;
   }
   return { name, summary, steps, warnings };
 }
