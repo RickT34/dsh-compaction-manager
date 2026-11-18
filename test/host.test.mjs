@@ -148,3 +148,54 @@ test('preset routes validate, merge, and export user presets', async () => {
     for (const fn of ctx.effects) if (typeof fn === 'function') fn();
   }
 });
+
+test('per-session presets: own choice, inherited by subagents, deleted preset falls back', async () => {
+  const { resolveSessionPipeline, cleanSessionPresets } = await import('../src/session-presets.js');
+  const presets = new Map([['aggressive', { name: 'A', steps: [{ method: 'dedupe' }] }], ['mine', { name: 'M', steps: [{ method: 'omit-output' }] }]]);
+  const parents = { child: 'parent', grand: 'child', parent: undefined, loopA: 'loopB', loopB: 'loopA' };
+  const base = { presets, globalPipeline: [{ method: 'trim-head-tail' }], parentOf: id => parents[id] };
+  const r = (id, choices) => resolveSessionPipeline(id, { ...base, choices });
+  assert.equal(r('parent', {}).source, 'global');
+  assert.deepEqual([r('parent', { parent: 'mine' }).source, r('parent', { parent: 'mine' }).presetId], ['session', 'mine']);
+  assert.deepEqual([r('grand', { parent: 'mine' }).source, r('grand', { parent: 'mine' }).from], ['parent', 'parent']);
+  assert.equal(r('child', { parent: 'mine', child: 'aggressive' }).presetId, 'aggressive', 'own choice wins over parent');
+  const gone = r('child', { child: 'deleted', parent: 'mine' });
+  assert.deepEqual([gone.source, gone.presetId, gone.missing.presetId], ['parent', 'mine', 'deleted']);
+  assert.equal(r('parent', { parent: 'deleted' }).source, 'global');
+  assert.equal(r('loopA', { x: 'mine' }).source, 'global', 'parent cycles terminate');
+  assert.deepEqual(cleanSessionPresets({ a: 'mine', b: 5, c: 'Bad Id', '': 'mine' }), { a: 'mine' });
+
+  // host wiring: preview, compaction hook and recall tool follow the session's choice
+  const ctx = fakeCtx();
+  const turns = [[{ name: 'bash', args: { command: 'cat big' }, result: 'w '.repeat(800) }], [{ name: 'bash', args: {}, result: 'ok' }]];
+  const session = makeSession(turns);
+  const other = makeSession(turns);
+  Object.defineProperty(other, 'id', { value: 'other-session' });
+  const userPresets = [{ id: 'user-omit', name: 'Omit all', summary: '', steps: [{ id: 'omit', method: 'omit-output', enabled: true, options: { keepRecent: 0 } }] }];
+  host.apply(ctx, host.Config({ userPresets, sessionPresets: { [session.id]: 'user-omit' } }));
+  try {
+    ctx.liveSessions.set(session.id, session);
+    ctx.liveSessions.set(other.id, other);
+    const info = await call(ctx, 'session-compaction', { sessionId: session.id });
+    assert.equal(info.value.choice, 'user-omit');
+    assert.equal(info.value.resolution.source, 'session');
+    assert.ok(info.value.presets.some(p => p.id === 'user-omit' && p.user));
+    const preview = await call(ctx, 'preview', { sessionId: session.id });
+    assert.equal(preview.value.resolution.presetId, 'user-omit');
+    assert.equal(preview.value.steps[0].method, 'omit-output');
+    const otherPreview = await call(ctx, 'preview', { sessionId: other.id });
+    assert.equal(otherPreview.value.resolution.source, 'global');
+    const tool = ctx.toolDefs[0];
+    assert.equal(await tool.opts.when({ agent: { session } }), true);
+    assert.equal(await tool.opts.when({ agent: { session: other } }), false);
+    const pruner = bareP();
+    pruner.pruneSession(other);
+    assert.equal(other.deriveMessages().some(m => m.role === 'tool' && m.content[0].text.startsWith('[compacted')), false, 'global default: official trim only');
+    pruner.pruneSession(session);
+    assert.ok(session.deriveMessages().some(m => m.role === 'tool' && m.content[0].text.startsWith('[compacted')), 'session preset ran');
+    const state = await call(ctx, 'state');
+    assert.equal(state.value.sessionPresetCount, 1);
+  } finally {
+    for (const fn of ctx.effects) if (typeof fn === 'function') fn();
+  }
+});

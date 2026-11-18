@@ -335,9 +335,20 @@ const zh = {
   showDiff: '查看对比',
   hideDiff: '收起对比',
   previewMoved: '压缩预览已移到会话页顶部的「压缩」标签（与「对话」「轨迹」并列），在那里可以查看当前会话的压缩效果并立即压缩。',
+  sessionPresetLabel: '这个会话使用',
+  sessionPresetFollow: '跟随全局设置',
+  sessionPresetInherit: '继承父会话的设置',
+  sessionPresetGone: '已删除的预设（{id}）',
+  sessionPresetOwn: '这个会话使用所选预设的步骤。',
+  sessionPresetGlobal: '这个会话使用压缩管理里保存的全局步骤。',
+  sessionPresetInherited: '这是子代理会话，继承父会话选择的预设「{name}」。',
+  sessionPresetMissing: '为这个会话选择的预设（{id}）已被删除，现在使用全局步骤。',
+  sessionPresetHint: '自动压缩和立即压缩都按这里的选择执行；它派出的子代理没有单独设置时也会沿用。LLM 摘要的参数仍使用全局设置。',
+  sessionPresetFailed: '设置失败：',
+  sessionPresetCount: '另有 {count} 个会话在自己的「压缩」标签里指定了预设，它们不使用这里的步骤。',
   viewTab: '压缩',
   viewTitle: '压缩预览',
-  viewSteps: '已保存的步骤：{steps}',
+  viewSteps: '步骤：{steps}',
   viewNoSteps: '没有启用的压缩步骤，请先在压缩管理里启用。',
   viewSettings: '压缩设置',
   viewRefresh: '刷新预览',
@@ -512,9 +523,20 @@ const en = {
   showDiff: 'Compare',
   hideDiff: 'Hide',
   previewMoved: 'The preview moved to the Compaction tab at the top of each session (next to Chat and Trajectory), where you can preview the current session and compact it now.',
+  sessionPresetLabel: 'This session uses',
+  sessionPresetFollow: 'Global settings',
+  sessionPresetInherit: 'Parent session’s choice',
+  sessionPresetGone: 'Deleted preset ({id})',
+  sessionPresetOwn: 'This session uses the steps of the chosen preset.',
+  sessionPresetGlobal: 'This session uses the global steps saved in the Compaction panel.',
+  sessionPresetInherited: 'This is a subagent session; it inherits the preset “{name}” chosen for its parent.',
+  sessionPresetMissing: 'The preset chosen for this session ({id}) was deleted; the global steps apply.',
+  sessionPresetHint: 'Automatic compaction and Compact now both follow this choice, and so do subagents it starts unless they have their own. LLM summary settings stay global.',
+  sessionPresetFailed: 'Could not save: ',
+  sessionPresetCount: '{count} session(s) chose their own preset in their Compaction tab and do not use these steps.',
   viewTab: 'Compaction',
   viewTitle: 'Compaction preview',
-  viewSteps: 'Saved steps: {steps}',
+  viewSteps: 'Steps: {steps}',
   viewNoSteps: 'No compaction step is enabled. Enable one in the Compaction panel.',
   viewSettings: 'Settings',
   viewRefresh: 'Refresh',
@@ -1211,12 +1233,65 @@ function PreviewStep({ step, methods, lang, t }) {
 }
 
 // ---- session-view.js
-// Session view tab: preview of the saved pipeline on this session, with "compact now".
-function SessionCompactionView({ ctx, sessionId }) {
+// Session view tab: choose this session's compaction preset, preview it, and compact now.
+function SessionPresetPicker({ info, form, sessionId, lang, t, onChanged }) {
+  const snap = useStore(cb => form.subscribe(cb), () => form.getSnapshot());
+  const [saving, setSaving] = React.useState(false);
+  const [error, setError] = React.useState('');
+  const writable = snap.status === 'ready' && snap.writable;
+  const name = preset => preset?.name?.[lang] ?? preset?.id ?? '';
+  const builtin = info.presets.filter(preset => !preset.user);
+  const user = info.presets.filter(preset => preset.user);
+  const choice = info.choice ?? '';
+  const resolution = info.resolution;
+
+  const choose = async value => {
+    setSaving(true);
+    setError('');
+    try {
+      // Removing the last choice removes the whole map, leaving no empty entry behind.
+      const path = value === '' && info.otherChoices === 0 ? ['sessionPresets'] : ['sessionPresets', sessionId];
+      const op = value === '' ? { op: 'unset', path } : { op: 'set', path, value };
+      const ok = await form.mutate([op], form.getSnapshot().revision);
+      if (!ok) throw new Error(t('notServed'));
+      await new Promise(resolve => setTimeout(resolve, 300));
+      await onChanged();
+    } catch (e) {
+      setError(t('sessionPresetFailed') + String(e?.message ?? e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  let note;
+  if (resolution.missing && resolution.missing.sessionId === sessionId) note = h('span', { className: 'cm-warn' }, fmt(t('sessionPresetMissing'), { id: resolution.missing.presetId }));
+  else if (resolution.source === 'parent') note = fmt(t('sessionPresetInherited'), { name: resolution.presetName?.[lang] ?? resolution.presetId });
+  else if (resolution.source === 'global') note = t('sessionPresetGlobal');
+  else note = t('sessionPresetOwn');
+
+  return h('div', { className: 'cm-section', style: { padding: '12px 14px' } },
+    h('div', { className: 'cm-row' },
+      h('label', { className: 'cm-name', htmlFor: 'cm-session-preset' }, t('sessionPresetLabel')),
+      h('select', {
+        id: 'cm-session-preset', className: 'cm-select cm-grow', disabled: !writable || saving, value: choice,
+        onChange: event => choose(event.target.value),
+      },
+        h('option', { value: '' }, info.parent && resolution.source === 'parent' ? t('sessionPresetInherit') : t('sessionPresetFollow')),
+        h('optgroup', { label: t('presets') }, builtin.map(preset => h('option', { key: preset.id, value: preset.id }, name(preset)))),
+        user.length > 0 ? h('optgroup', { label: t('presetUser') }, user.map(preset => h('option', { key: preset.id, value: preset.id }, name(preset)))) : null,
+        choice && !info.presets.some(preset => preset.id === choice) ? h('option', { value: choice }, fmt(t('sessionPresetGone'), { id: choice })) : null),
+      saving ? h('span', { className: 'cm-muted cm-sum' }, t('saving')) : null),
+    h('div', { className: 'cm-sum', style: { marginTop: 6 } }, note, ' ', t('sessionPresetHint')),
+    !writable ? h('div', { className: 'cm-sum cm-muted' }, snap.status === 'ready' ? t('readOnly') : t('notServed')) : null,
+    error ? h('div', { className: 'cm-msg err' }, error) : null);
+}
+
+function SessionCompactionView({ ctx, sessionId, form }) {
   useStore(cb => ctx.locale.subscribe(cb), () => ctx.locale.getSnapshot?.().revision ?? langOf(ctx));
   const t = makeT(ctx);
   const lang = langOf(ctx);
   const [state, setState] = React.useState(undefined);
+  const [info, setInfo] = React.useState(undefined);
   const [result, setResult] = React.useState(undefined);
   const [manual, setManual] = React.useState(undefined);
   const [busy, setBusy] = React.useState(false);
@@ -1227,9 +1302,10 @@ function SessionCompactionView({ ctx, sessionId }) {
     setBusy(true);
     setError('');
     try {
-      const nextState = await callHost('state');
+      const [nextState, nextInfo] = await Promise.all([callHost('state'), callHost('session-compaction', { sessionId })]);
       setState(nextState);
-      const preview = await callHost('preview', { sessionId, pipeline: nextState.pipeline });
+      setInfo(nextInfo);
+      const preview = await callHost('preview', { sessionId });
       setResult(preview);
       setManual(preview.manual);
     } catch (e) {
@@ -1265,7 +1341,7 @@ function SessionCompactionView({ ctx, sessionId }) {
 
   const saved = result ? result.beforeTokens - result.afterTokens : 0;
   const percent = result && result.beforeTokens > 0 ? `${((saved / result.beforeTokens) * 100).toFixed(1)}%` : '0%';
-  const enabled = (state?.pipeline ?? []).filter(step => step.enabled);
+  const enabled = (result?.resolution?.pipeline ?? info?.resolution?.pipeline ?? []).filter(step => step.enabled);
   const names = enabled.map(step => state.methods.find(m => m.id === step.method)?.name?.[lang] ?? step.method);
   const changes = result ? result.steps.reduce((sum, step) => sum + step.items.length + (step.more ?? 0), 0) : 0;
 
@@ -1291,6 +1367,7 @@ function SessionCompactionView({ ctx, sessionId }) {
         h('button', { type: 'button', className: 'cm-btn', onClick: openPanel }, t('viewSettings')),
         h('button', { type: 'button', className: 'cm-btn', disabled: busy, onClick: refresh }, busy ? t('previewing') : t('viewRefresh')),
         h('button', { type: 'button', className: 'cm-btn primary', disabled: busy || !result || changes === 0 || Boolean(manual?.queuedAt), onClick: compactNow }, t('compactNow'))),
+      info ? h(SessionPresetPicker, { info, form, sessionId, lang, t, onChanged: refresh }) : null,
       h('p', { className: 'cm-hint', style: { margin: 0 } }, t('compactNowHint')),
       manualLine,
       error ? h('p', { className: 'cm-msg err' }, error) : null,
@@ -1408,6 +1485,7 @@ function CompactionPage({ ctx, form }) {
       h('section', { className: 'cm-section' },
         h('h2', null, t('sectionPipeline')),
         h('p', { className: 'cm-hint' }, t('pipelineHint')),
+        state.sessionPresetCount > 0 ? h('p', { className: 'cm-hint' }, fmt(t('sessionPresetCount'), { count: state.sessionPresetCount })) : null,
         h(PipelineEditor, {
           pipeline: current.pipeline, methods: state.methods, presets: state.presets ?? [], lang, t, disabled: !writable,
           onChange: pipeline => edit({ pipeline }),
@@ -1460,7 +1538,7 @@ function apply(ctx) {
   ctx.effect(() => ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
     name: 'sidebar.panellist', id: PANEL_ID, order: 40, locale: NS, label: () => makeT(ctx)('title'),
   }, props => h(CompactIcon, { size: typeof props?.size === 'number' ? props.size : 18 }))), 'compaction-manager: sidebar entry');
-  const View = props => h(SessionCompactionView, { ctx, sessionId: props?.sessionId });
+  const View = props => h(SessionCompactionView, { ctx, sessionId: props?.sessionId, form });
   ctx.effect(() => ctx.slots.inject('conversation.view', () => ctx.slots.register({
     name: 'conversation.view', id: PANEL_ID, order: 40, locale: NS, label: () => makeT(ctx)('viewTab'),
     inject: sessionId => ({ sessionId }),

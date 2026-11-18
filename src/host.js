@@ -7,6 +7,7 @@ import { installIntegration, cleanBasicOverrides } from './integration.js';
 import { enabledSteps, estimatorOf, fallbackEstimate, isDefaultPipeline, previewSession, recallActive, runPipeline } from './pipeline.js';
 import { liveAccessor, recoverOriginal, snapshotAccessor, surfaceEntries } from './session-view.js';
 import { render } from './format-runtime.js';
+import { cleanSessionPresets, resolveSessionPipeline } from './session-presets.js';
 import { cleanPreset, exportFile, mergeImported, parsePresetFile, savePreset, storedUserPresets, toStored } from './user-presets.js';
 
 export const name = 'compaction-manager';
@@ -43,6 +44,8 @@ export const Config = z.object({
     summary: z.string(),
     steps: z.array(stepSchema),
   })).default([]).volatile().description('Presets saved or imported in the panel.'),
+  sessionPresets: z.dict(z.string()).default({}).volatile()
+    .description('Preset chosen for individual sessions (session id → preset id). Subagent sessions inherit their parent\'s choice.'),
 });
 
 const MAX_BODY = 256 * 1024;
@@ -120,12 +123,32 @@ export function apply(ctx, config) {
     return [...registry.describePresets(), ...user];
   }
 
+  // Steps for one session: its own preset, its parent's, or the global steps.
+  function presetMap() {
+    const map = new Map();
+    for (const preset of registry.describePresets()) map.set(preset.id, { name: preset.name, steps: preset.steps, user: false });
+    for (const preset of userPresets()) map.set(preset.id, { name: { zh: preset.name, en: preset.name }, steps: preset.steps, user: true });
+    return map;
+  }
+  function resolveFor(sessionId, extraHeaders = new Map()) {
+    const choices = cleanSessionPresets(read('sessionPresets', {}));
+    const globalPipeline = read('pipeline', DEFAULT_PIPELINE);
+    if (!sessionId || Object.keys(choices).length === 0) return { source: 'global', pipeline: globalPipeline };
+    return resolveSessionPipeline(sessionId, {
+      choices,
+      presets: presetMap(),
+      globalPipeline,
+      parentOf: id => (extraHeaders.get(id) ?? ctx.sessions.get(id)?.header)?.parentSession,
+    });
+  }
+
   const integration = installIntegration(official, {
     logger,
     stats,
     basicOverrides: () => read('basic', {}),
     runPipeline(pruner, session, original) {
-      const pipeline = read('pipeline', DEFAULT_PIPELINE);
+      const resolution = resolveFor(session.id);
+      const pipeline = resolution.pipeline;
       const steps = enabledSteps(pipeline, registry);
       const runOfficial = target => original.call(pruner, target);
       const meter = pruner.ctx?.tokenMeter ?? ctx.get('tokenMeter');
@@ -137,9 +160,9 @@ export function apply(ctx, config) {
       }
       if (steps.length === 0) return { pruned: [], charsRemoved: 0 };
       const report = runPipeline({ session, meter, registry, pipeline, prunerConfig, runOfficial, logger });
-      stats.runs.unshift({ at: Date.now(), sessionId: session.id, steps: report.steps, tokensSaved: report.tokensSaved });
+      stats.runs.unshift({ at: Date.now(), sessionId: session.id, steps: report.steps, tokensSaved: report.tokensSaved, presetId: resolution.presetId });
       stats.runs.length = Math.min(stats.runs.length, 20);
-      logger.info?.(`compaction-manager: pipeline on ${session.id}: ${report.steps.map(step => `${step.id}=${step.applied}`).join(', ')}, ~${report.tokensSaved} tokens`);
+      logger.info?.(`compaction-manager: pipeline${resolution.presetId ? ` (preset ${resolution.presetId})` : ''} on ${session.id}: ${report.steps.map(step => `${step.id}=${step.applied}`).join(', ')}, ~${report.tokensSaved} tokens`);
       return { pruned: report.pruned, charsRemoved: report.charsRemoved };
     },
   });
@@ -177,7 +200,7 @@ export function apply(ctx, config) {
       return { id: String(args.id), text, truncated: end < full.length, remaining: Math.max(0, full.length - end), nextOffset: end };
     },
   }, {
-    when: () => recallActive(read('pipeline', DEFAULT_PIPELINE), registry, read('recall', 'auto')),
+    when: activation => recallActive(resolveFor(activation?.agent?.session?.id).pipeline, registry, read('recall', 'auto')),
   });
 
   const route = (path, handler) => ctx.connection.fetch.register({
@@ -201,6 +224,7 @@ export function apply(ctx, config) {
     basic: read('basic', {}),
     recall: read('recall', 'auto'),
     recallActive: recallActive(read('pipeline', DEFAULT_PIPELINE), registry, read('recall', 'auto')),
+    sessionPresetCount: Object.keys(cleanSessionPresets(read('sessionPresets', {}))).length,
     integration: integration.status,
     prunerConfigs: [...stats.prunerConfigs.values()],
     basicConfigs: [...stats.basicEngines.values()].map(engine => {
@@ -275,8 +299,8 @@ export function apply(ctx, config) {
   route('preview', async (input, signal) => {
     const sessionId = String(input.sessionId ?? '');
     if (sessionId === '') throw new Error('sessionId is required');
-    const pipeline = Array.isArray(input.pipeline) ? input.pipeline : read('pipeline', DEFAULT_PIPELINE);
     let entries;
+    const headers = new Map();
     const live = ctx.sessions.get(sessionId);
     if (live !== undefined) entries = surfaceEntries(liveAccessor(live));
     else {
@@ -284,9 +308,12 @@ export function apply(ctx, config) {
       if (query === undefined || official.foldSurface === undefined) throw new Error('session is not live and no session query is available');
       const snapshot = await query.readSession(sessionId);
       signal?.throwIfAborted?.();
+      if (snapshot.session) headers.set(sessionId, snapshot.session);
       const fold = official.foldSurface(snapshot.events, ctx.sessions.messageProjections ?? []);
       entries = surfaceEntries(snapshotAccessor(snapshot.events, fold, official.deriveEventMessage));
     }
+    const resolution = Array.isArray(input.pipeline) ? { source: 'explicit', pipeline: input.pipeline } : resolveFor(sessionId, headers);
+    const pipeline = resolution.pipeline;
     const prunerConfig = currentPrunerConfig();
     const estimate = estimatorOf(ctx.get('tokenMeter'));
     const result = previewSession(entries, pipeline, registry, estimate, prunerConfig);
@@ -304,6 +331,32 @@ export function apply(ctx, config) {
         more: Math.max(0, step.items.length - 200),
       })),
       manual: manualStatus(sessionId),
+      resolution: describeResolution(resolution),
+    };
+  });
+
+  function describeResolution(resolution) {
+    return {
+      source: resolution.source,
+      from: resolution.from,
+      presetId: resolution.presetId,
+      presetName: resolution.presetName,
+      pipeline: normalizePipeline(resolution.pipeline),
+      missing: resolution.missing,
+    };
+  }
+
+  route('session-compaction', async input => {
+    const sessionId = String(input.sessionId ?? '');
+    if (sessionId === '') throw new Error('sessionId is required');
+    const choices = cleanSessionPresets(read('sessionPresets', {}));
+    return {
+      sessionId,
+      choice: choices[sessionId] ?? null,
+      otherChoices: Object.keys(choices).filter(id => id !== sessionId).length,
+      parent: ctx.sessions.get(sessionId)?.header?.parentSession ?? null,
+      resolution: describeResolution(resolveFor(sessionId)),
+      presets: [...presetMap()].map(([id, preset]) => ({ id, name: preset.name, user: preset.user, steps: preset.steps.length })),
     };
   });
 
@@ -327,10 +380,11 @@ export function apply(ctx, config) {
     if (request !== undefined && payload.signal?.aborted !== true) {
       queued.delete(session.id);
       try {
-        const report = runPipeline({ session, meter: ctx.get('tokenMeter') ?? { estimateMessage: fallbackEstimate }, registry, pipeline: read('pipeline', DEFAULT_PIPELINE), prunerConfig: currentPrunerConfig(), logger });
+        const resolution = resolveFor(session.id);
+        const report = runPipeline({ session, meter: ctx.get('tokenMeter') ?? { estimateMessage: fallbackEstimate }, registry, pipeline: resolution.pipeline, prunerConfig: currentPrunerConfig(), logger });
         const applied = report.steps.reduce((sum, step) => sum + step.applied, 0);
         lastManual.set(session.id, { at: Date.now(), requestedAt: request.at, applied, tokensSaved: report.tokensSaved, steps: report.steps });
-        stats.runs.unshift({ at: Date.now(), sessionId: session.id, steps: report.steps, tokensSaved: report.tokensSaved, manual: true });
+        stats.runs.unshift({ at: Date.now(), sessionId: session.id, steps: report.steps, tokensSaved: report.tokensSaved, manual: true, presetId: resolution.presetId });
         stats.runs.length = Math.min(stats.runs.length, 20);
         logger.info?.(`compaction-manager: manual compaction on ${session.id}: ${applied} change(s), ~${report.tokensSaved} tokens`);
       } catch (error) {
@@ -348,7 +402,7 @@ export function apply(ctx, config) {
       queued.delete(sessionId);
       return manualStatus(sessionId);
     }
-    if (enabledSteps(read('pipeline', DEFAULT_PIPELINE), registry).length === 0) throw new Error('no compaction step is enabled');
+    if (enabledSteps(resolveFor(sessionId).pipeline, registry).length === 0) throw new Error('no compaction step is enabled');
     queued.set(sessionId, { at: Date.now() });
     return manualStatus(sessionId);
   });

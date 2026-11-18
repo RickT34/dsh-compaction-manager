@@ -102,6 +102,7 @@ function CompactionPage({ ctx, form }) {
       h('section', { className: 'cm-section' },
         h('h2', null, t('sectionPipeline')),
         h('p', { className: 'cm-hint' }, t('pipelineHint')),
+        state.sessionPresetCount > 0 ? h('p', { className: 'cm-hint' }, fmt(t('sessionPresetCount'), { count: state.sessionPresetCount })) : null,
         h(PipelineEditor, {
           pipeline: current.pipeline, methods: state.methods, presets: state.presets ?? [], lang, t, disabled: !writable,
           onChange: pipeline => edit({ pipeline }),
@@ -154,7 +155,7 @@ function apply(ctx) {
   ctx.effect(() => ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
     name: 'sidebar.panellist', id: PANEL_ID, order: 40, locale: NS, label: () => makeT(ctx)('title'),
   }, props => h(CompactIcon, { size: typeof props?.size === 'number' ? props.size : 18 }))), 'compaction-manager: sidebar entry');
-  const View = props => h(SessionCompactionView, { ctx, sessionId: props?.sessionId });
+  const View = props => h(SessionCompactionView, { ctx, sessionId: props?.sessionId, form });
   ctx.effect(() => ctx.slots.inject('conversation.view', () => ctx.slots.register({
     name: 'conversation.view', id: PANEL_ID, order: 40, locale: NS, label: () => makeT(ctx)('viewTab'),
     inject: sessionId => ({ sessionId }),

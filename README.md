@@ -18,6 +18,7 @@ This plugin adds a model-free stage in front of the summary, and you decide exac
 - **Tool call arguments, too.** Besides outputs, steps can fold whole tool calls, such as a `write` that carried an entire file, down to a summary or just the call's description.
 - **You define the text, too.** Every method's output is a template. A **Format…** button on each step opens an editor with the available variables, a live preview on sample data, and a preview on a real session, so you can decide exactly what the model sees in place of a hidden call.
 - **Presets to start from.** Presets modeled on Magic Compact and OpenCode DCP, plus an aggressive one, fill in the steps for you; edit them afterwards. Save your own step lists as presets, and import or export them as JSON to share.
+- **Per session, too.** Each session's Compaction tab can switch that session, and the subagents it starts, to any preset.
 - **See it before it happens.** Each session gets a **Compaction** tab showing every change the steps would make, with the text before and after and the estimated tokens saved. **Compact now** applies them.
 - **One place for all compaction settings.** The official summary's threshold, retention, retries and summary model are in the same panel and apply without a restart.
 - **Safe by default.** With no configuration it behaves exactly like stock DSH. Sessions stay readable after the plugin is removed.
@@ -156,6 +157,8 @@ Templates cannot run code. Two safeguards apply to custom formats as they do to 
 
 ## Session tab: preview and compact now
 
+**This session uses** at the top of the tab picks the steps for this session: the global settings, or any built-in or custom preset. Automatic compaction and Compact now follow the choice. A subagent session without its own choice inherits its parent's, so a preset chosen for a main session also applies to the subagents it starts. A preset is referenced by id: editing a custom preset changes every session that uses it, and deleting one sends those sessions back to the global steps, with a notice in the tab. LLM summary settings stay global. The Compaction panel shows how many sessions chose their own preset.
+
 The **Compaction** tab simulates the saved steps on the current session without writing anything. It shows the estimated token count before and after, and every change each step would make, with the text before and after.
 
 **Compact now** applies those changes without a model call. DSH accepts history rewrites only inside a model turn, so the request is queued and runs right before the session's next model call: within seconds while the session is running, or when you send the next message while it is idle. A queued request can be cancelled. Compact now runs only the steps; for an LLM summary, use `/compact`.
@@ -246,6 +249,7 @@ npm run build      # regenerate dist/client.js from src/client/*.js
 | `src/formats.js` | Default templates, variables and samples of the built-in formats |
 | `src/methods.js` | Built-in methods |
 | `src/presets.js` | Built-in presets and 0.1.x migration |
+| `src/session-presets.js` | Per-session preset choice and subagent inheritance |
 | `src/user-presets.js` | Validation, saving and import/export of custom presets |
 | `src/registry.js` | Method and preset registry, pipeline normalization |
 | `src/integration.js` | Wrappers around the official compaction classes |
