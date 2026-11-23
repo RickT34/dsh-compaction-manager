@@ -23,9 +23,9 @@ This plugin adds a model-free stage in front of the summary, and you decide exac
 - **One place for all compaction settings.** The official summary's threshold, retention, retries and summary model are in the same panel and apply without a restart.
 - **Safe by default.** With no configuration it behaves exactly like stock DSH. Sessions stay readable after the plugin is removed.
 
-On the session this plugin was developed in (about 470k estimated tokens, 380 tool results), the Aggressive preset cut the estimate by 31% without any model call.
+On a long session (about 364k estimated tokens, 220 tool results), the Aggressive preset cut the estimate from 363.6k to 88.2k, a 75.7% reduction, without any model call. The screenshot shows the Chinese UI.
 
-![Session compaction tab](assets/screenshot-preview-en.png)
+![Session compaction tab](assets/screenshot-preview-zh.png)
 
 ## Install
 
