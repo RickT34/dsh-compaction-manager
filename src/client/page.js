@@ -51,7 +51,7 @@ function CompactionPage({ ctx, form }) {
   if (loadError) return h('div', { className: 'cm-page' }, h('div', { className: 'cm-inner' }, h('p', { className: 'cm-msg err' }, t('loadFailed') + loadError), h('div', null, h('button', { type: 'button', className: 'cm-btn', onClick: load }, t('retry')))));
   if (state === undefined) return h('div', { className: 'cm-page' }, h('div', { className: 'cm-inner cm-muted' }, t('loading')));
 
-  const saved = { pipeline: state.pipeline, basic: state.basic ?? {}, recall: state.recall ?? 'auto' };
+  const saved = { pipeline: state.pipeline, summaryPrompt: state.summaryPrompt ?? '', basic: state.basic ?? {}, recall: state.recall ?? 'auto' };
 
   const current = draft ?? saved;
   const dirty = draft !== undefined && !sameJson(draft, saved);
@@ -62,10 +62,11 @@ function CompactionPage({ ctx, form }) {
     setSaving(true);
     setMessage(undefined);
     try {
-      await callHost('validate', { basic: current.basic });
+      await callHost('validate', { basic: current.basic, summaryPrompt: current.summaryPrompt });
       const ops = [];
       const isDefaultPipeline = sameJson(current.pipeline, state.defaultPipeline);
       ops.push(isDefaultPipeline ? { op: 'unset', path: ['pipeline'] } : { op: 'set', path: ['pipeline'], value: current.pipeline });
+      ops.push(current.summaryPrompt === '' ? { op: 'unset', path: ['summaryPrompt'] } : { op: 'set', path: ['summaryPrompt'], value: current.summaryPrompt });
       ops.push(Object.keys(current.basic).length === 0 ? { op: 'unset', path: ['basic'] } : { op: 'set', path: ['basic'], value: current.basic });
       ops.push(current.recall === 'auto' ? { op: 'unset', path: ['recall'] } : { op: 'set', path: ['recall'], value: current.recall });
       const ok = await form.mutate(ops, snap.revision);
@@ -104,8 +105,9 @@ function CompactionPage({ ctx, form }) {
         h('p', { className: 'cm-hint' }, t('pipelineHint')),
         state.sessionPresetCount > 0 ? h('p', { className: 'cm-hint' }, fmt(t('sessionPresetCount'), { count: state.sessionPresetCount })) : null,
         h(PipelineEditor, {
-          pipeline: current.pipeline, methods: state.methods, presets: state.presets ?? [], lang, t, disabled: !writable,
-          onChange: pipeline => edit({ pipeline }),
+          pipeline: current.pipeline, summaryPrompt: current.summaryPrompt, official: state.officialSummaryPrompt ?? '', promptMax: state.summaryPromptMax ?? 20000,
+          methods: state.methods, presets: state.presets ?? [], lang, t, disabled: !writable,
+          onChange: patch => edit(patch),
           onWriteUserPresets: writeUserPresets,
         })),
       h('section', { className: 'cm-section' },

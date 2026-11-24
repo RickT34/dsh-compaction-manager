@@ -15,12 +15,13 @@ export function cleanSessionPresets(raw) {
 }
 
 /**
- * Resolve the steps a session uses.
+ * Resolve the steps and summary prompt a session uses. Both come from the
+ * same place: a preset carries its own prompt, the global steps the global one.
  * @param sessionId - session being compacted or previewed.
- * @param context - { choices, presets: Map(id → { name, steps }), globalPipeline, parentOf(id) }
- * @returns { source: 'session'|'parent'|'global', from?, presetId?, presetName?, pipeline, missing? }
+ * @param context - { choices, presets: Map(id → { name, steps, summaryPrompt? }), globalPipeline, globalSummaryPrompt?, parentOf(id) }
+ * @returns { source: 'session'|'parent'|'global', from?, presetId?, presetName?, pipeline, summaryPrompt?, missing? }
  */
-export function resolveSessionPipeline(sessionId, { choices, presets, globalPipeline, parentOf }) {
+export function resolveSessionPipeline(sessionId, { choices, presets, globalPipeline, globalSummaryPrompt, parentOf }) {
   let id = sessionId;
   let missing;
   const seen = new Set();
@@ -30,7 +31,7 @@ export function resolveSessionPipeline(sessionId, { choices, presets, globalPipe
     if (presetId !== undefined) {
       const preset = presets.get(presetId);
       if (preset !== undefined) {
-        return { source: depth === 0 ? 'session' : 'parent', from: id, presetId, presetName: preset.name, pipeline: preset.steps, missing };
+        return { source: depth === 0 ? 'session' : 'parent', from: id, presetId, presetName: preset.name, pipeline: preset.steps, summaryPrompt: preset.summaryPrompt, missing };
       }
       // A deleted preset falls through to the parent, then the global steps.
       missing ??= { sessionId: id, presetId };
@@ -39,5 +40,5 @@ export function resolveSessionPipeline(sessionId, { choices, presets, globalPipe
     try { parent = parentOf(id); } catch { parent = undefined; }
     id = typeof parent === 'string' ? parent : undefined;
   }
-  return { source: 'global', pipeline: globalPipeline, missing };
+  return { source: 'global', pipeline: globalPipeline, summaryPrompt: globalSummaryPrompt, missing };
 }

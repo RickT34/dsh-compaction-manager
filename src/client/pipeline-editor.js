@@ -163,6 +163,7 @@ function fileSafe(name) {
 const MAX_IMPORT_BYTES = 200 * 1024;
 
 function PresetCard({ preset, active, lang, t, disabled, onApply, onExport, onRemove }) {
+  const customPrompt = typeof preset.summaryPrompt === 'string' && preset.summaryPrompt !== '';
   const [confirming, setConfirming] = React.useState(false);
   React.useEffect(() => {
     if (!confirming) return undefined;
@@ -173,6 +174,7 @@ function PresetCard({ preset, active, lang, t, disabled, onApply, onExport, onRe
     h('div', { className: 'cm-row' },
       h('span', { className: 'cm-name cm-grow' }, preset.name?.[lang] ?? preset.id),
       preset.user ? h('span', { className: 'cm-badge' }, t('presetUser')) : null,
+      customPrompt ? h('span', { className: 'cm-badge brand', title: t('promptCustomHint') }, t('promptCustomBadge')) : null,
       active ? h('span', { className: 'cm-badge brand' }, t('presetActive')) : h('button', { type: 'button', className: 'cm-btn', disabled, onClick: () => onApply(preset) }, t('applyPreset'))),
     preset.summary?.[lang] ? h('div', { className: 'cm-sum' }, preset.summary[lang]) : null,
     h('div', { className: 'cm-row' },
@@ -185,7 +187,7 @@ function PresetCard({ preset, active, lang, t, disabled, onApply, onExport, onRe
     (preset.warnings ?? []).length > 0 ? h('div', { className: 'cm-sum cm-warn' }, preset.warnings.join('; ')) : null);
 }
 
-function SavePresetForm({ pipeline, userNames, t, onSave, onCancel }) {
+function SavePresetForm({ pipeline, summaryPrompt, userNames, t, onSave, onCancel }) {
   const [name, setName] = React.useState('');
   const [summary, setSummary] = React.useState('');
   const [busy, setBusy] = React.useState(false);
@@ -207,13 +209,14 @@ function SavePresetForm({ pipeline, userNames, t, onSave, onCancel }) {
         h('span', null, t('presetSummary')),
         h('input', { className: 'cm-input', value: summary, maxLength: 400, onChange: e => setSummary(e.target.value) }))),
     h('div', { className: 'cm-row' },
-      h('span', { className: 'cm-sum cm-grow' }, fmt(t('presetSaveHint'), { count: pipeline.length })),
+      h('span', { className: 'cm-sum cm-grow' }, fmt(t('presetSaveHint'), { count: pipeline.length }), ' ', summaryPrompt ? t('presetSavePromptCustom') : t('presetSavePromptOfficial')),
       h('button', { type: 'button', className: 'cm-btn', onClick: onCancel }, t('cancel')),
       h('button', { type: 'submit', className: 'cm-btn primary', disabled: busy || !trimmed || pipeline.length === 0 }, busy ? t('saving') : t('savePreset'))));
 }
 
-function PresetBar({ presets, pipeline, methods, lang, t, disabled, userWritable, onApply, onWriteUserPresets }) {
+function PresetBar({ presets, pipeline, summaryPrompt, methods, lang, t, disabled, userWritable, onApply, onWriteUserPresets }) {
   const current = stepsShape(pipeline, methods);
+  const isActive = preset => stepsShape(preset.steps, methods) === current && (preset.summaryPrompt ?? '') === summaryPrompt;
   const [saving, setSaving] = React.useState(false);
   const [message, setMessage] = React.useState(undefined);
   const fileInput = React.useRef(null);
@@ -228,13 +231,13 @@ function PresetBar({ presets, pipeline, methods, lang, t, disabled, userWritable
   };
   const remove = async id => {
     try {
-      await onWriteUserPresets(user.filter(preset => preset.id !== id).map(preset => ({ id: preset.id, name: preset.name.zh, summary: preset.summary.zh, steps: preset.steps })));
+      await onWriteUserPresets(user.filter(preset => preset.id !== id).map(preset => ({ id: preset.id, name: preset.name.zh, summary: preset.summary.zh, steps: preset.steps, ...(preset.summaryPrompt ? { summaryPrompt: preset.summaryPrompt } : {}) })));
       report(true, t('presetRemoved'));
     } catch (error) { report(false, t('presetFailed') + String(error?.message ?? error)); }
   };
   const save = async (name, summary) => {
     try {
-      const result = await callHost('presets/save', { name, summary, steps: pipeline });
+      const result = await callHost('presets/save', { name, summary, steps: pipeline, ...(summaryPrompt ? { summaryPrompt } : {}) });
       await onWriteUserPresets(result.userPresets);
       setSaving(false);
       report(true, fmt(t(result.replaced ? 'presetReplaced' : 'presetSaved'), { name }), result.warnings);
@@ -260,13 +263,13 @@ function PresetBar({ presets, pipeline, methods, lang, t, disabled, userWritable
       h('button', { type: 'button', className: 'cm-btn', disabled: !userWritable, onClick: () => fileInput.current?.click() }, t('importPresets')),
       h('button', { type: 'button', className: 'cm-btn', disabled: user.length === 0, onClick: () => exportPresets(undefined) }, t('exportAll')),
       h('input', { ref: fileInput, type: 'file', accept: 'application/json,.json', style: { display: 'none' }, onChange: importFile })),
-    saving ? h(SavePresetForm, { pipeline, userNames: user.map(preset => preset.name.zh), t, onSave: save, onCancel: () => setSaving(false) }) : null,
+    saving ? h(SavePresetForm, { pipeline, summaryPrompt, userNames: user.map(preset => preset.name.zh), t, onSave: save, onCancel: () => setSaving(false) }) : null,
     message ? h('div', { className: `cm-msg ${message.ok ? 'ok' : 'err'}` },
       message.text,
       (message.details ?? []).length > 0 ? h('ul', { className: 'cm-sum', style: { margin: '4px 0 0', paddingLeft: 18 } }, message.details.map((line, i) => h('li', { key: i }, line))) : null) : null,
     h('div', { className: 'cm-presets' },
       presets.map(preset => h(PresetCard, {
-        key: `${preset.user ? 'u' : 'b'}:${preset.id}`, preset, active: stepsShape(preset.steps, methods) === current, lang, t, disabled,
+        key: `${preset.user ? 'u' : 'b'}:${preset.id}`, preset, active: isActive(preset), lang, t, disabled,
         onApply, onExport: exportPresets, onRemove: remove,
       }))));
 }
@@ -282,8 +285,11 @@ function AddStep({ methods, lang, t, disabled, onAdd }) {
     method ? h('div', { className: 'cm-sum' }, method.summary?.[lang]) : null);
 }
 
-function PipelineEditor({ pipeline, methods, presets, lang, t, disabled, onChange, onWriteUserPresets }) {
+function PipelineEditor({ pipeline, summaryPrompt, official, promptMax, methods, presets, lang, t, disabled, onChange: onPatch, onWriteUserPresets }) {
   const byId = new Map(methods.map(method => [method.id, method]));
+  const [promptOpen, setPromptOpen] = React.useState(false);
+  const onChange = next => onPatch({ pipeline: next });
+  const customPrompt = summaryPrompt !== '';
   const update = (index, patch) => onChange(pipeline.map((step, i) => (i === index ? { ...step, ...patch } : step)));
   const move = (index, delta) => {
     const next = [...pipeline];
@@ -292,7 +298,7 @@ function PipelineEditor({ pipeline, methods, presets, lang, t, disabled, onChang
     onChange(next);
   };
   return h('div', { className: 'cm-steps' },
-    h(PresetBar, { presets, pipeline, methods, lang, t, disabled, userWritable: !disabled, onApply: preset => onChange(clone(preset.steps)), onWriteUserPresets }),
+    h(PresetBar, { presets, pipeline, summaryPrompt, methods, lang, t, disabled, userWritable: !disabled, onApply: preset => onPatch({ pipeline: clone(preset.steps), summaryPrompt: preset.summaryPrompt ?? '' }), onWriteUserPresets }),
     h('div', { className: 'cm-label' }, t('steps')),
     pipeline.length === 0 ? h('p', { className: 'cm-hint' }, t('noSteps')) : null,
     pipeline.map((step, index) => h(StepCard, {
@@ -308,6 +314,63 @@ function PipelineEditor({ pipeline, methods, presets, lang, t, disabled, onChang
       h('div', { className: 'cm-step-top' },
         h('div', { className: 'cm-idx' }, '∑'),
         h('div', { className: 'cm-grow' },
-          h('div', { className: 'cm-name' }, t('finalStep')),
-          h('div', { className: 'cm-sum' }, t('finalStepHint'))))));
+          h('div', { className: 'cm-row' },
+            h('span', { className: 'cm-name' }, t('finalStep')),
+            h('span', { className: `cm-badge${customPrompt ? ' brand' : ''}` }, customPrompt ? t('promptCustomBadge') : t('promptOfficialBadge'))),
+          h('div', { className: 'cm-sum' }, t('finalStepHint'))),
+        h('button', { type: 'button', className: 'cm-btn', disabled: disabled || !official, onClick: () => setPromptOpen(true) }, t('promptButton')),
+        customPrompt ? h('button', { type: 'button', className: 'cm-btn ghost', disabled, onClick: () => onPatch({ summaryPrompt: '' }) }, t('promptResetOfficial')) : null)),
+    promptOpen ? h(SummaryPromptDialog, {
+      value: summaryPrompt, official, max: promptMax, t,
+      onClose: () => setPromptOpen(false),
+      onApply: value => { onPatch({ summaryPrompt: value }); setPromptOpen(false); },
+    }) : null);
+}
+
+/** '' stands for the official prompt, so a text equal to it is stored as ''. */
+function promptValue(text, official) {
+  const normalized = String(text).replace(/\r\n?/g, '\n');
+  return normalized.trim() === '' || normalized.trim() === official ? '' : normalized;
+}
+
+function SummaryPromptDialog({ value, official, max, t, onApply, onClose }) {
+  const initial = value === '' ? official : value;
+  const [draft, setDraft] = React.useState(initial);
+  const area = React.useRef(null);
+  const length = Array.from(draft).length;
+  const tooLong = length > max;
+  const dirty = draft !== initial;
+  const result = promptValue(draft, official);
+  const close = () => { if (!dirty || window.confirm(t('promptDiscard'))) onClose(); };
+  React.useEffect(() => {
+    const onKey = event => { if (event.key === 'Escape') { event.stopPropagation(); close(); } };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  });
+  React.useEffect(() => { area.current?.focus(); }, []);
+  const warnings = [];
+  if (result !== '' && !draft.includes('compacted-summary')) warnings.push(t('promptNoMergeWarn'));
+  return h('div', { className: 'cm-overlay', onMouseDown: event => { if (event.target === event.currentTarget) close(); } },
+    h('div', { className: 'cm-dialog', role: 'dialog', 'aria-modal': true, 'aria-label': t('promptTitle'), style: { width: 'min(900px,96vw)' } },
+      h('header', { className: 'cm-dialog-head' },
+        h('div', { className: 'cm-grow' },
+          h('div', { className: 'cm-row' },
+            h('span', { className: 'cm-name' }, t('promptTitle')),
+            h('span', { className: `cm-badge${result === '' ? '' : ' brand'}` }, result === '' ? t('promptOfficialBadge') : t('promptCustomBadge'))),
+          h('div', { className: 'cm-sum' }, t('promptHint'))),
+        h('button', { type: 'button', className: 'cm-btn ghost', 'aria-label': t('cancel'), onClick: close }, '✕')),
+      h('div', { className: 'cm-dialog-body', style: { gridTemplateColumns: '1fr' } },
+        h('div', { className: 'cm-dialog-col' },
+          h('div', { className: 'cm-row' },
+            h('span', { className: 'cm-label cm-grow' }, t('promptEditor')),
+            h('span', { className: `cm-sum${tooLong ? ' cm-warn' : ' cm-muted'}` }, fmt(t('formatLength'), { n: length, max }))),
+          h('textarea', { ref: area, className: 'cm-textarea cm-template', style: { minHeight: 380 }, spellCheck: false, value: draft, onChange: event => setDraft(event.target.value), 'aria-label': t('promptEditor') }),
+          draft.trim() === '' ? h('div', { className: 'cm-sum' }, t('promptEmpty')) : null,
+          warnings.map((text, index) => h('div', { key: index, className: 'cm-sum cm-warn' }, text)),
+          h('details', { className: 'cm-sum' }, h('summary', null, t('promptHowTitle')), h('p', { className: 'cm-details', style: { marginTop: 6 } }, t('promptHow'))))),
+      h('footer', { className: 'cm-dialog-foot' },
+        h('button', { type: 'button', className: 'cm-btn', disabled: draft === official, onClick: () => setDraft(official) }, t('promptResetOfficial')),
+        tooLong ? h('span', { className: 'cm-msg err cm-grow' }, fmt(t('promptTooLong'), { max })) : h('span', { className: 'cm-grow' }),
+        h('button', { type: 'button', className: 'cm-btn', onClick: close }, t('cancel')),
+        h('button', { type: 'button', className: 'cm-btn primary', disabled: tooLong, onClick: () => onApply(result) }, t('formatApply')))));
 }

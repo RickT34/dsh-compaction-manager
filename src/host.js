@@ -9,6 +9,7 @@ import { liveAccessor, recoverOriginal, snapshotAccessor, surfaceEntries } from 
 import { render } from './format-runtime.js';
 import { cleanSessionPresets, resolveSessionPipeline } from './session-presets.js';
 import { cleanPreset, exportFile, mergeImported, parsePresetFile, savePreset, storedUserPresets, toStored } from './user-presets.js';
+import { OFFICIAL_SUMMARY_PROMPT, SUMMARY_PROMPT_MAX, cleanSummaryPrompt, rewriteSummaryRequest, storedSummaryPrompt } from './summary-prompt.js';
 
 export const name = 'compaction-manager';
 export const inject = ['sessions', 'tools', 'connection'];
@@ -36,6 +37,8 @@ export const Config = z.object({
     summarizationModel: z.string(),
     auto: z.boolean(),
   }).volatile().description('Overrides of compaction-basic. Empty means the official values.'),
+  summaryPrompt: z.string().volatile()
+    .description('Instruction compaction-basic sends to the model when it writes the LLM summary, used with the global steps. Empty means the official prompt. A preset carries its own.'),
   recall: z.union(['auto', 'always', 'never']).default('auto').volatile()
     .description('When restore_context is offered: auto = only while an enabled step leaves recall ids.'),
   userPresets: z.array(z.object({
@@ -43,6 +46,7 @@ export const Config = z.object({
     name: z.string(),
     summary: z.string(),
     steps: z.array(stepSchema),
+    summaryPrompt: z.string(),
   })).default([]).volatile().description('Presets saved or imported in the panel.'),
   sessionPresets: z.dict(z.string()).default({}).volatile()
     .description('Preset chosen for individual sessions (session id → preset id). Subagent sessions inherit their parent\'s choice.'),
@@ -118,6 +122,7 @@ export function apply(ctx, config) {
       name: { zh: preset.name, en: preset.name },
       summary: { zh: preset.summary, en: preset.summary },
       steps: preset.steps,
+      ...(preset.summaryPrompt === undefined ? {} : { summaryPrompt: preset.summaryPrompt }),
       warnings: preset.warnings,
     }));
     return [...registry.describePresets(), ...user];
@@ -126,18 +131,20 @@ export function apply(ctx, config) {
   // Steps for one session: its own preset, its parent's, or the global steps.
   function presetMap() {
     const map = new Map();
-    for (const preset of registry.describePresets()) map.set(preset.id, { name: preset.name, steps: preset.steps, user: false });
-    for (const preset of userPresets()) map.set(preset.id, { name: { zh: preset.name, en: preset.name }, steps: preset.steps, user: true });
+    for (const preset of registry.describePresets()) map.set(preset.id, { name: preset.name, steps: preset.steps, summaryPrompt: preset.summaryPrompt, user: false });
+    for (const preset of userPresets()) map.set(preset.id, { name: { zh: preset.name, en: preset.name }, steps: preset.steps, summaryPrompt: preset.summaryPrompt, user: true });
     return map;
   }
   function resolveFor(sessionId, extraHeaders = new Map()) {
     const choices = cleanSessionPresets(read('sessionPresets', {}));
     const globalPipeline = read('pipeline', DEFAULT_PIPELINE);
-    if (!sessionId || Object.keys(choices).length === 0) return { source: 'global', pipeline: globalPipeline };
+    const globalSummaryPrompt = storedSummaryPrompt(read('summaryPrompt', undefined));
+    if (!sessionId || Object.keys(choices).length === 0) return { source: 'global', pipeline: globalPipeline, summaryPrompt: globalSummaryPrompt };
     return resolveSessionPipeline(sessionId, {
       choices,
       presets: presetMap(),
       globalPipeline,
+      globalSummaryPrompt,
       parentOf: id => (extraHeaders.get(id) ?? ctx.sessions.get(id)?.header)?.parentSession,
     });
   }
@@ -146,6 +153,7 @@ export function apply(ctx, config) {
     logger,
     stats,
     basicOverrides: () => read('basic', {}),
+    summaryPrompt: agent => resolveFor(agent?.session?.id).summaryPrompt,
     runPipeline(pruner, session, original) {
       const resolution = resolveFor(session.id);
       const pipeline = resolution.pipeline;
@@ -167,6 +175,18 @@ export function apply(ctx, config) {
     },
   });
   ctx.effect(() => () => integration.dispose(), 'compaction-manager: official integration');
+
+  // Swap compaction-basic's summary instruction for the session's custom one.
+  // `global` reaches the LLM service inside each agent preset's isolated group;
+  // `prepend` lets later listeners see the request that is actually sent.
+  ctx.on('llm/stream', (options, next) => {
+    try {
+      if (rewriteSummaryRequest(options, logger)) logger.info?.(`compaction-manager: custom summary prompt on ${options.sessionId ?? 'a session'}`);
+    } catch (error) {
+      logger.warn(`compaction-manager: using the official summary prompt: ${error.message}`);
+    }
+    return next();
+  }, { global: true, prepend: true });
 
   // Model-facing retrieval; offered only while recall ids can exist.
   ctx.tools.register({
@@ -222,6 +242,9 @@ export function apply(ctx, config) {
     defaultPipeline: normalizePipeline(DEFAULT_PIPELINE),
     presets: allPresets(),
     basic: read('basic', {}),
+    summaryPrompt: storedSummaryPrompt(read('summaryPrompt', undefined)) ?? '',
+    officialSummaryPrompt: OFFICIAL_SUMMARY_PROMPT,
+    summaryPromptMax: SUMMARY_PROMPT_MAX,
     recall: read('recall', 'auto'),
     recallActive: recallActive(read('pipeline', DEFAULT_PIPELINE), registry, read('recall', 'auto')),
     sessionPresetCount: Object.keys(cleanSessionPresets(read('sessionPresets', {}))).length,
@@ -236,13 +259,14 @@ export function apply(ctx, config) {
 
   route('validate', async input => {
     cleanBasicOverrides(input.basic ?? {});
+    cleanSummaryPrompt(input.summaryPrompt);
     return true;
   });
 
   // Preset routes validate and merge; the panel writes the returned list
   // through its settings form, so saving follows the normal settings path.
   route('presets/save', async input => {
-    const preset = cleanPreset({ name: input.name, summary: input.summary, steps: input.steps }, registry);
+    const preset = cleanPreset({ name: input.name, summary: input.summary, steps: input.steps, summaryPrompt: input.summaryPrompt }, registry);
     const result = savePreset(userPresets(), preset);
     return { userPresets: toStored(result.userPresets), id: result.preset.id, replaced: result.replaced, warnings: preset.warnings };
   });
@@ -342,6 +366,7 @@ export function apply(ctx, config) {
       presetId: resolution.presetId,
       presetName: resolution.presetName,
       pipeline: normalizePipeline(resolution.pipeline),
+      summaryPrompt: resolution.summaryPrompt === undefined ? 'official' : 'custom',
       missing: resolution.missing,
     };
   }
@@ -356,7 +381,7 @@ export function apply(ctx, config) {
       otherChoices: Object.keys(choices).filter(id => id !== sessionId).length,
       parent: ctx.sessions.get(sessionId)?.header?.parentSession ?? null,
       resolution: describeResolution(resolveFor(sessionId)),
-      presets: [...presetMap()].map(([id, preset]) => ({ id, name: preset.name, user: preset.user, steps: preset.steps.length })),
+      presets: [...presetMap()].map(([id, preset]) => ({ id, name: preset.name, user: preset.user, steps: preset.steps.length, customPrompt: preset.summaryPrompt !== undefined })),
     };
   });
 

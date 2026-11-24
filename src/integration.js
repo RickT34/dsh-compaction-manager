@@ -9,7 +9,10 @@
 //   • BasicCompactionEngine.prototype.{compactIfNeeded, compactPressure,
 //     summarize, compactNow} → apply panel overrides of compaction-basic's
 //     policy. With no overrides the instance config is left untouched.
+//     summarize also marks the call with the session's custom summary prompt
+//     (see summary-prompt.js); without one it runs unchanged.
 // Disposing the plugin restores every original method and config.
+import { summaryPromptScope } from './summary-prompt.js';
 
 const ORIGINALS = Symbol.for('dsh-compaction-manager.originals');
 const BASIC_CONFIG = Symbol.for('dsh-compaction-manager.basic-config');
@@ -77,7 +80,7 @@ function mergeBasic(original, overrides) {
 /**
  * Install the wrappers.
  * @param modules - { pruner: ToolResultPruner class?, basic: BasicCompactionEngine class? }
- * @param hooks - { runPipeline(pruner, session, original), basicOverrides(), autoEnabled(), logger, stats }
+ * @param hooks - { runPipeline(pruner, session, original), basicOverrides(), summaryPrompt(agent), logger, stats }
  * @returns disposer restoring originals
  */
 export function installIntegration(modules, hooks) {
@@ -136,7 +139,12 @@ export function installIntegration(modules, hooks) {
       }),
       wrap(basicProto, 'summarize', original => async function summarize(input, agent, signal) {
         sync(this);
-        return original.call(this, input, agent, signal);
+        let prompt;
+        try { prompt = hooks.summaryPrompt?.(agent); } catch (error) {
+          hooks.logger.warn(`compaction-manager: using the official summary prompt: ${error.message}`);
+        }
+        if (prompt === undefined) return original.call(this, input, agent, signal);
+        return summaryPromptScope.run({ prompt, used: false }, () => original.call(this, input, agent, signal));
       }),
       wrap(basicProto, 'compactNow', original => function compactNow(agent, signal, sourceCommandId) {
         sync(this);

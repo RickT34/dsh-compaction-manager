@@ -4,7 +4,7 @@ function SessionPresetPicker({ info, form, sessionId, lang, t, onChanged }) {
   const [saving, setSaving] = React.useState(false);
   const [error, setError] = React.useState('');
   const writable = snap.status === 'ready' && snap.writable;
-  const name = preset => preset?.name?.[lang] ?? preset?.id ?? '';
+  const name = preset => `${preset?.name?.[lang] ?? preset?.id ?? ''}${preset?.customPrompt ? ` · ${t('promptCustomBadge')}` : ''}`;
   const builtin = info.presets.filter(preset => !preset.user);
   const user = info.presets.filter(preset => preset.user);
   const choice = info.choice ?? '';
@@ -46,7 +46,7 @@ function SessionPresetPicker({ info, form, sessionId, lang, t, onChanged }) {
         user.length > 0 ? h('optgroup', { label: t('presetUser') }, user.map(preset => h('option', { key: preset.id, value: preset.id }, name(preset)))) : null,
         choice && !info.presets.some(preset => preset.id === choice) ? h('option', { value: choice }, fmt(t('sessionPresetGone'), { id: choice })) : null),
       saving ? h('span', { className: 'cm-muted cm-sum' }, t('saving')) : null),
-    h('div', { className: 'cm-sum', style: { marginTop: 6 } }, note, ' ', t('sessionPresetHint')),
+    h('div', { className: 'cm-sum', style: { marginTop: 6 } }, note, ' ', resolution.summaryPrompt === 'custom' ? t('sessionPromptCustom') : t('sessionPromptOfficial'), ' ', t('sessionPresetHint')),
     !writable ? h('div', { className: 'cm-sum cm-muted' }, snap.status === 'ready' ? t('readOnly') : t('notServed')) : null,
     error ? h('div', { className: 'cm-msg err' }, error) : null);
 }

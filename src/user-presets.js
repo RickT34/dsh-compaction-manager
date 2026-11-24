@@ -4,6 +4,7 @@ import { resolveOptions } from './core.js';
 import { cleanFormats, formatOverrides } from './format-runtime.js';
 import { TEMPLATE_MAX } from './template.js';
 import { ID, normalizePipeline } from './registry.js';
+import { cleanSummaryPrompt } from './summary-prompt.js';
 
 export const PRESET_FILE_FORMAT = 'dsh-compaction-manager.presets';
 export const PRESET_FILE_VERSION = 1;
@@ -45,13 +46,14 @@ function label(value, max, field) {
 
 /**
  * Validate one preset from untrusted input.
- * @returns { name, summary, steps, warnings }
+ * @returns { name, summary, steps, summaryPrompt?, warnings }
  */
 export function cleanPreset(raw, registry) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('a preset must be an object');
   const name = label(raw.name, NAME_MAX, 'name');
   if (name === '') throw new Error('the preset needs a name');
   const summary = label(raw.summary, SUMMARY_MAX, 'summary');
+  const summaryPrompt = cleanSummaryPrompt(raw.summaryPrompt);
   if (!Array.isArray(raw.steps) || raw.steps.length === 0) throw new Error('the preset needs at least one step');
   if (raw.steps.length > MAX_STEPS) throw new Error(`the preset has more than ${MAX_STEPS} steps`);
   const input = raw.steps.map((step, index) => {
@@ -81,7 +83,7 @@ export function cleanPreset(raw, registry) {
     if (Object.keys(overrides).length > 0) step.formats = overrides;
     else delete step.formats;
   }
-  return { name, summary, steps, warnings };
+  return { name, summary, steps, ...(summaryPrompt === undefined ? {} : { summaryPrompt }), warnings };
 }
 
 /** Accepted import shapes: a preset file, a bare preset array, or one preset. */
@@ -130,7 +132,7 @@ export function storedUserPresets(raw, registry) {
 
 /** Strip derived fields before writing to settings. */
 export function toStored(presets) {
-  return presets.map(({ id, name, summary, steps }) => ({ id, name, summary, steps }));
+  return presets.map(({ id, name, summary, steps, summaryPrompt }) => ({ id, name, summary, steps, ...(summaryPrompt === undefined ? {} : { summaryPrompt }) }));
 }
 
 /**
@@ -169,6 +171,6 @@ export function exportFile(presets) {
   return {
     format: PRESET_FILE_FORMAT,
     version: PRESET_FILE_VERSION,
-    presets: presets.map(({ name, summary, steps }) => ({ name, summary, steps })),
+    presets: presets.map(({ name, summary, steps, summaryPrompt }) => ({ name, summary, steps, ...(summaryPrompt === undefined ? {} : { summaryPrompt }) })),
   };
 }

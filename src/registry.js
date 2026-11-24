@@ -4,6 +4,7 @@ import { resolveOptions } from './core.js';
 import { cleanFormats } from './format-runtime.js';
 import { describeFormats } from './formats.js';
 import { parseTemplate } from './template.js';
+import { cleanSummaryPrompt, storedSummaryPrompt } from './summary-prompt.js';
 import { BUILTIN_METHODS } from './methods.js';
 import { BUILTIN_PRESETS, DEFAULT_PIPELINE, migrateLegacyStep } from './presets.js';
 
@@ -45,6 +46,9 @@ function validatePreset(preset) {
   for (const item of preset.steps) {
     if (typeof item?.method !== 'string') throw new TypeError(`compaction preset "${preset.id}" has a step without a method`);
   }
+  try { cleanSummaryPrompt(preset.summaryPrompt); } catch (error) {
+    throw new TypeError(`compaction preset "${preset.id}": ${error.message}`);
+  }
 }
 
 export class MethodRegistry {
@@ -72,7 +76,7 @@ export class MethodRegistry {
     };
   }
 
-  /** Register a preset `{ id, name, summary, steps: [{ method, enabled?, options? }] }`; returns its disposer. */
+  /** Register a preset `{ id, name, summary, steps: [{ method, enabled?, options? }], summaryPrompt? }`; returns its disposer. */
   registerPreset(preset) {
     validatePreset(preset);
     if (this.presets.has(preset.id)) throw new Error(`compaction preset "${preset.id}" is already registered`);
@@ -131,15 +135,19 @@ export class MethodRegistry {
     });
   }
 
-  /** JSON-safe preset descriptions, with normalized steps. */
+  /** JSON-safe preset descriptions, with normalized steps; no summaryPrompt means the official one. */
   describePresets() {
-    return [...this.presets.values()].map(preset => ({
-      id: preset.id,
-      builtin: preset.builtin === true,
-      name: localized(preset.name, preset.id),
-      summary: localized(preset.summary),
-      steps: normalizePipeline(preset.steps),
-    }));
+    return [...this.presets.values()].map(preset => {
+      const summaryPrompt = storedSummaryPrompt(preset.summaryPrompt);
+      return {
+        id: preset.id,
+        builtin: preset.builtin === true,
+        name: localized(preset.name, preset.id),
+        summary: localized(preset.summary),
+        steps: normalizePipeline(preset.steps),
+        ...(summaryPrompt === undefined ? {} : { summaryPrompt }),
+      };
+    });
   }
 }
 

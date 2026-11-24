@@ -17,6 +17,7 @@ This plugin adds a model-free stage in front of the summary, and you decide exac
 - **Nothing is lost.** Hidden content stays in the session log. The model sees what each call was for and can restore any part of it by id.
 - **Tool call arguments, too.** Besides outputs, steps can fold whole tool calls, such as a `write` that carried an entire file, down to a summary or just the call's description.
 - **You define the text, too.** Every method's output is a template. A **Format…** button on each step opens an editor with the available variables, a live preview on sample data, and a preview on a real session, so you can decide exactly what the model sees in place of a hidden call.
+- **Your own summary prompt.** The official LLM summary prompt is hard-coded and asks for English. Here each preset can carry its own prompt, for example to get summaries in Chinese or a different section layout. Without one, the official text is used.
 - **Presets to start from.** Presets modeled on Magic Compact and OpenCode DCP, plus an aggressive one, fill in the steps for you; edit them afterwards. Save your own step lists as presets, and import or export them as JSON to share.
 - **Per session, too.** Each session's Compaction tab can switch that session, and the subagents it starts, to any preset.
 - **See it before it happens.** Each session gets a **Compaction** tab showing every change the steps would make, with the text before and after and the estimated tokens saved. **Compact now** applies them.
@@ -47,7 +48,7 @@ After installing:
 DSH compacts when a request would exceed the threshold, when the provider reports a context overflow, or when you switch models. With this plugin installed, compaction runs in two stages:
 
 1. **Steps.** The enabled steps run in order. Each step rewrites some old tool results or tool call groups and never calls a model.
-2. **LLM summary.** If the context is still over the threshold, `compaction-basic` replaces the oldest history with a model-written summary. This stage is always last. Its settings are in the panel (see [Panel settings](#panel-settings)).
+2. **LLM summary.** If the context is still over the threshold, `compaction-basic` replaces the oldest history with a model-written summary. This stage is always last. Its settings are in the panel (see [Panel settings](#panel-settings)), and its prompt belongs to the preset (see [LLM summary prompt](#llm-summary-prompt)).
 
 Notices left by the steps keep the call's `description` argument in full and carry an id. Head/tail trim is the exception: it leaves the call untouched and adds an id only when **Include recall id** is on. While any enabled step leaves ids, the model gets a `restore_context` tool that returns the original content for an id.
 
@@ -72,7 +73,7 @@ Results the model has not answered yet are never touched. The one exception is h
 
 ## Presets
 
-A preset is a ready-made list of steps. **Apply** replaces the current steps, which you can then edit before saving. The preset that matches the current steps is marked **Current**.
+A preset is a ready-made list of steps plus an LLM summary prompt. **Apply** replaces the current steps and prompt, which you can then edit before saving. The preset that matches both the current steps and prompt is marked **Current**. Every built-in preset uses the official prompt.
 
 | Preset | Steps |
 |---|---|
@@ -85,7 +86,7 @@ Neither Magic Compact nor OpenCode DCP is ported in full. The parts of those pro
 
 ### Custom presets
 
-- **Save as preset** stores the steps being edited, including unsaved changes, under a name and an optional description. Saving under the name of an existing custom preset replaces it.
+- **Save as preset** stores the steps and summary prompt being edited, including unsaved changes, under a name and an optional description. Saving under the name of an existing custom preset replaces it. A preset with its own prompt is marked **Custom prompt**.
 - **Delete** on a custom preset asks for a second click to confirm.
 - **Export** on a custom preset downloads it as JSON. **Export all custom presets** downloads every one.
 - **Import** reads such a file. Each preset is validated, valid presets are added, a name that already exists gets a number appended, and the reason for each rejected preset is listed.
@@ -105,13 +106,14 @@ The file format:
       "steps": [
         { "method": "omit-output", "options": { "tools": ["read"], "minChars": 500 } },
         { "method": "trim-head-tail" }
-      ]
+      ],
+      "summaryPrompt": "(optional) LLM summary prompt; omit it for the official prompt"
     }
   ]
 }
 ```
 
-A bare array of presets, or a single preset object, is accepted as well. Imports are limited to 200 KB, 50 presets per file, 50 steps per preset, 60-character names and 400-character descriptions. Step options must satisfy the method's own rules. A preset that uses a method from a plugin you have not installed still imports, with a warning.
+A bare array of presets, or a single preset object, is accepted as well. Imports are limited to 200 KB, 50 presets per file, 50 steps per preset, 60-character names, 400-character descriptions and 20000-character summary prompts. Step options must satisfy the method's own rules. A preset that uses a method from a plugin you have not installed still imports, with a warning.
 
 ## Custom formats
 
@@ -148,16 +150,32 @@ Templates cannot run code. Two safeguards apply to custom formats as they do to 
 {{/calls}}Call restore_context with id "{{id}}" to view the original.
 ```
 
+## LLM summary prompt
+
+When `compaction-basic` writes a summary, it replays the span being compacted to the summary model unchanged (same system prompt, tools and messages, so the prompt cache still hits) and appends one user message with the instruction. The official instruction asks for an English checkpoint with eight fixed sections. The reply is wrapped in `<compacted-summary>` and replaces the compacted history.
+
+**Summary prompt** on the **LLM summary** row at the end of the step list edits that instruction. The editor starts with the official text; leaving it blank, or changing it back to the official text, means the official prompt. **Apply** puts it in the draft and the page's **Save** makes it live: the next LLM summary uses it, with no restart.
+
+The prompt belongs to the preset:
+
+- The global steps have a global prompt, the one edited and saved in the panel.
+- Applying a preset also switches to its prompt; saving a preset stores the current prompt with it, and exported files include it.
+- When a session picks a preset in its Compaction tab, its LLM summary uses that preset's prompt, and subagents follow their parent's choice. The tab shows whether the session uses the official or a custom prompt.
+
+The official prompt has one rule worth keeping: when the conversation already contains a `<compacted-summary>` block, merge that earlier summary into the new one instead of copying it. The editor warns when a custom prompt does not mention `<compacted-summary>`; without that rule, repeated compactions can nest summaries.
+
+Under the hood, the plugin marks the session's prompt for the duration of `summarize()` and replaces only the final message of that request through the `llm/stream` event. `compaction-basic` still picks the summary model and handles the output cap, retries and errors, and no other request is touched. The framing text placed around the summary ("This is an automatically generated checkpoint…") cannot be changed.
+
 ## Panel settings
 
-- **Compaction steps and order**: presets, custom presets, and the step list. You can add, remove, reorder, enable and configure steps, and edit each step's output format. **Save** applies the steps at the next compaction; no restart is needed.
+- **Compaction steps and order**: presets, custom presets, the step list, and the LLM summary prompt. You can add, remove, reorder, enable and configure steps, and edit each step's output format. **Save** applies the steps at the next compaction; no restart is needed.
 - **Automatic compaction (compaction-basic)**: automatic compaction on or off, `thresholdRatio`, `retainRatio` or `retainTokens`, `headroomTokens`, summary `maxTokens`, summary retries, overflow recoveries, and the summary provider and model. A blank field keeps the official value, and the placeholder shows the value in effect. Turning automatic compaction off also stops overflow recovery; `/compact` still works.
 - **Recall tool restore_context**: *Auto* offers the tool only while an enabled step leaves ids. *Always* and *Never* override that.
 - **Recent runs**: the last 20 pipeline runs, with the number of changes per step and the estimated tokens saved.
 
 ## Session tab: preview and compact now
 
-**This session uses** at the top of the tab picks the steps for this session: the global settings, or any built-in or custom preset. Automatic compaction and Compact now follow the choice. A subagent session without its own choice inherits its parent's, so a preset chosen for a main session also applies to the subagents it starts. A preset is referenced by id: editing a custom preset changes every session that uses it, and deleting one sends those sessions back to the global steps, with a notice in the tab. LLM summary settings stay global. The Compaction panel shows how many sessions chose their own preset.
+**This session uses** at the top of the tab picks the steps for this session: the global settings, or any built-in or custom preset. Automatic compaction and Compact now follow the choice. A subagent session without its own choice inherits its parent's, so a preset chosen for a main session also applies to the subagents it starts. A preset is referenced by id: editing a custom preset changes every session that uses it, and deleting one sends those sessions back to the global steps, with a notice in the tab. The LLM summary prompt follows the chosen preset; other LLM summary settings stay global. The Compaction panel shows how many sessions chose their own preset.
 
 The **Compaction** tab simulates the saved steps on the current session without writing anything. It shows the estimated token count before and after, and every change each step would make, with the text before and after.
 
@@ -179,6 +197,7 @@ The Web app mounts `compaction-basic` and `tool-result-pruner` inside each agent
 
 - `ToolResultPruner.prototype.pruneSession` runs the configured steps. When the steps are exactly the default, it calls the original method unchanged.
 - The `BasicCompactionEngine.prototype` methods apply the panel's overrides of the compaction policy. With no overrides, the engine's own configuration is used as is.
+- An `llm/stream` listener replaces the final instruction of the request `summarize()` sends when the session uses a custom summary prompt. With the official prompt it does nothing.
 
 Unloading the plugin restores the original methods. Every rewrite uses the same replay-safe events as the official pruner (`compaction/prune` followed by a surface `replace`), so sessions stay readable after the plugin is removed. Pipelines saved by 0.1.x, whose methods were the presets themselves, are converted to the equivalent steps when read.
 
@@ -222,6 +241,8 @@ export function apply(ctx) {
     name: { zh: '我的预设', en: 'My preset' },
     summary: { zh: '…', en: '…' },
     steps: [{ method: 'dedupe' }, { method: 'my-method', options: { minChars: 2000 } }],
+    // Optional: the LLM summary prompt for sessions using this preset; omit it for the official prompt.
+    summaryPrompt: '…',
   }))
 }
 ```
