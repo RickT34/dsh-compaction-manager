@@ -1,6 +1,6 @@
 {
   "name": "dsh-compaction-manager",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
   "description": "Unified compaction panel for DeepSeek Harness: order model-free compaction methods (official pruner, Magic Compact, OpenCode DCP, tool-call folding), tune compaction-basic, preview results, and restore hidden content.",
   "license": "MIT",
